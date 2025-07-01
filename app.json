@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "DrYnks",
+    "slug": "drynks-app",
+    "version": "1.0.0",
+    "sdkVersion": "53.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/app_icon.png",
+    "scheme": "drynks",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/drYnks_logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "jsEngine": "hermes",
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.drynks.app",
+      "buildNumber": "1.0.0",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to find nearby dates and events.",
+        "NSCameraUsageDescription": "This app uses your camera to update your profile photo.",
+        "NSPhotoLibraryUsageDescription": "This app needs access to your photos for uploading your gallery."
+      }
+    },
+    "android": {
+      "package": "com.drynks.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/app_icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/images/app_icon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "YOUR-EAS-PROJECT-ID"
+      }
+    }
+  }
+}
