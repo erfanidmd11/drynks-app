@@ -1,4 +1,4 @@
-// Fully Patched AppNavigator.tsx
+// AppNavigator.tsx
 import React, { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -21,55 +21,36 @@ import { View, ActivityIndicator } from 'react-native';
 const Stack = createNativeStackNavigator();
 
 const AppNavigator = () => {
-  const [session, setSession] = useState(null);
-  const [initialRoute, setInitialRoute] = useState<'Splash' | 'App' | string>('Splash');
+  const [initialRoute, setInitialRoute] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const initialize = async () => {
       try {
-        console.log('[INIT] Checking Supabase session...');
-        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-        if (sessionError) throw sessionError;
+        const { data: sessionData } = await supabase.auth.getSession();
+        const session = sessionData?.session;
 
-        const currentSession = sessionData?.session ?? null;
-        setSession(currentSession);
+        if (session?.user?.id) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
 
-        if (!currentSession?.user?.id) {
-          setInitialRoute('Login');
-          setLoading(false);
-          return;
+          const nextStep = getNextIncompleteStep(profile);
+          setInitialRoute(nextStep || 'App');
+        } else {
+          setInitialRoute('ProfileSetupStepOne');
         }
-
-        console.log('[INIT] Fetching user profile...');
-        const { data: profile, error: profileError } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', currentSession.user.id)
-          .single();
-
-        if (profileError) throw profileError;
-
-        const nextStep = getNextIncompleteStep(profile);
-        setInitialRoute(nextStep || 'App');
-        console.log('[INIT] Routing to:', nextStep || 'App');
       } catch (error) {
         console.error('[INIT ERROR]', error);
-        setInitialRoute('Splash');
+        setInitialRoute('ProfileSetupStepOne');
       } finally {
         setLoading(false);
       }
     };
 
     initialize();
-
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
-
-    return () => {
-      listener?.subscription.unsubscribe();
-    };
   }, []);
 
   const getNextIncompleteStep = (profile: any): string | null => {
@@ -100,6 +81,8 @@ const AppNavigator = () => {
       </View>
     );
   }
+
+  if (!initialRoute) return null;
 
   return (
     <NavigationContainer>
