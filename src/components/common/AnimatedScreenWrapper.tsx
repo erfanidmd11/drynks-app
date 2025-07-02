@@ -1,4 +1,4 @@
-// AnimatedScreenWrapper.tsx
+// Patched AnimatedScreenWrapper.tsx with fallback
 import React, { ReactNode } from 'react';
 import { View, StyleSheet } from 'react-native';
 import Animated, { FadeInRight, FadeOutLeft } from 'react-native-reanimated';
@@ -10,9 +10,10 @@ interface Props {
 const AnimatedScreenWrapper = ({ children }: Props) => {
   return (
     <Animated.View
-      entering={FadeInRight.duration(500)}
-      exiting={FadeOutLeft.duration(300)}
-      style={styles.container}>
+      entering={FadeInRight?.duration?.(500) ?? undefined}
+      exiting={FadeOutLeft?.duration?.(300) ?? undefined}
+      style={styles.container}
+    >
       {children}
     </Animated.View>
   );

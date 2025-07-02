@@ -1,4 +1,4 @@
-// SignupStepOne.tsx
+// SignupStepOne.tsx (Patched)
 import React, { useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Alert, TouchableOpacity } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -29,16 +29,21 @@ const SignupStepOne = () => {
       return;
     }
 
-    const { error } = await supabase.auth.signUp({ email, password });
+    try {
+      const { error } = await supabase.auth.signUp({ email, password });
 
-    if (error) {
-      Alert.alert('Signup Error', error.message);
-    } else {
-      Alert.alert(
-        'Check Your Inbox 📬',
-        'We’ve sent a verification email to finish setting up your account. Peek in your spam folder if it’s playing hard to get.'
-      );
-      navigation.navigate('ProfileSetupStepTwo');
+      if (error) {
+        Alert.alert('Signup Error', error.message);
+      } else {
+        Alert.alert(
+          'Check Your Inbox 📬',
+          'We’ve sent a verification email to finish setting up your account. Peek in your spam folder if it’s playing hard to get.',
+          [{ text: 'OK', onPress: () => navigation.navigate('ProfileSetupStepTwo') }]
+        );
+      }
+    } catch (err) {
+      console.error('[Signup Error]', err);
+      Alert.alert('Unexpected Error', 'Something went wrong.');
     }
   };
 

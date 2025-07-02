@@ -1,18 +1,23 @@
-// ProfileMenu.tsx
+// Crash-Safe ProfileMenu.tsx
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Image, StyleSheet, Modal } from 'react-native';
+import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../config/supabase';
-
 
 const ProfileMenu = () => {
   const navigation = useNavigation();
   const [visible, setVisible] = useState(false);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setVisible(false);
+    try {
+      await supabase.auth.signOut();
+      setVisible(false);
+      navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+    } catch (err) {
+      console.error('[Logout Error]', err);
+      Alert.alert('Logout Failed', 'Something went wrong.');
+    }
   };
 
   return (

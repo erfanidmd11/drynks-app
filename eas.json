@@ -3,19 +3,11 @@
     "version": ">= 3.0.0"
   },
   "build": {
-    "development": {
-      "developmentClient": true,
-      "distribution": "internal"
-    },
-    "preview": {
-      "distribution": "internal",
-      "channel": "preview"
-    },
     "production": {
-      "channel": "production"
+      "channel": "production",
+      "env": {
+        "EXPO_NO_CAPABILITY_SYNC": "1"
+      }
     }
-  },
-  "submit": {
-    "production": {}
   }
 }

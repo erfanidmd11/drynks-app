@@ -1,5 +1,5 @@
-// src/screens/Home/DateFeedScreen.tsx
-import React, { useState, useEffect, useRef } from 'react';
+// Fully Patched DateFeedScreen.tsx (Crash-Safe)
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, FlatList, RefreshControl, ScrollView, Animated } from 'react-native';
 import ShimmerPlaceHolder from 'react-native-shimmer-placeholder';
 import { supabase } from '../../config/supabase';
@@ -7,39 +7,58 @@ import AppShell from '../../components/AppShell';
 import DateCard from '../../components/cards/DateCard';
 import VerifyBanner from '../../components/banners/VerifyBanner';
 
-
 const sections = ['Pending Responses', 'Your Joined Dates', 'Your Created Dates', 'Nearby Dates'];
 
 const DateFeedScreen = () => {
-  const [profile, setProfile] = useState<any>();
+  const [profile, setProfile] = useState<any>(null);
   const [dates, setDates] = useState({ pending: [], joined: [], created: [], public: [] });
   const [loading, setLoading] = useState(true);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   const loadProfile = async () => {
-    const uid = await supabase.auth.getUser().then(r => r.data.user?.id);
-    const { data } = await supabase.from('profiles').select().eq('id', uid).single();
-    setProfile(data);
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const uid = userData?.user?.id;
+      if (!uid) throw new Error('User not authenticated');
+      const { data, error } = await supabase.from('profiles').select().eq('id', uid).single();
+      if (error) throw error;
+      setProfile(data);
+    } catch (error) {
+      console.error('[Profile Load Error]', error);
+    }
   };
 
   const loadDates = async () => {
-    setLoading(true);
-    const now = new Date().toISOString();
-    const { data: all = [] } = await supabase
-      .from('date_requests')
-      .select('*, creator:profiles(*)')
-      .gte('event_date', now)
-      .order('event_date', { ascending: true });
+    try {
+      setLoading(true);
+      const now = new Date().toISOString();
+      const { data: all = [], error } = await supabase
+        .from('date_requests')
+        .select('*, creator:profiles(*)')
+        .gte('event_date', now)
+        .order('event_date', { ascending: true });
+      if (error) throw error;
 
-    const uid = await supabase.auth.getUser().then(r => r.data.user?.id);
-    const pending = all.filter(d => (d.pending_users || []).includes(uid));
-    const joined = all.filter(d => (d.accepted_users || []).includes(uid));
-    const created = all.filter(d => d.creator === uid);
-    const publicDates = all.filter(d => !d.pending_users?.includes(uid) && !d.accepted_users?.includes(uid) && d.creator !== uid);
+      const { data: userData } = await supabase.auth.getUser();
+      const uid = userData?.user?.id;
+      if (!uid) throw new Error('User not authenticated');
 
-    setDates({ pending, joined, created, public: publicDates });
-    setLoading(false);
-    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+      const pending = all.filter(d => (d.pending_users || []).includes(uid));
+      const joined = all.filter(d => (d.accepted_users || []).includes(uid));
+      const created = all.filter(d => d.creator?.id === uid);
+      const publicDates = all.filter(
+        d => !(d.pending_users || []).includes(uid) &&
+             !(d.accepted_users || []).includes(uid) &&
+             d.creator?.id !== uid
+      );
+
+      setDates({ pending, joined, created, public: publicDates });
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    } catch (error) {
+      console.error('[Date Load Error]', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -47,13 +66,13 @@ const DateFeedScreen = () => {
     loadDates();
   }, []);
 
-  const renderDateCard = ({ item }) => (
+  const renderDateCard = useCallback(({ item }) => (
     <DateCard
       date={item}
       userId={profile?.id}
-      isCreator={item.creator === profile?.id}
-      isAccepted={item.accepted_users?.includes(profile?.id)}
-      isPending={item.pending_users?.includes(profile?.id)}
+      isCreator={item.creator?.id === profile?.id}
+      isAccepted={(item.accepted_users || []).includes(profile?.id)}
+      isPending={(item.pending_users || []).includes(profile?.id)}
       showChat={true}
       onTap={() => {}}
       onAccept={() => {}}
@@ -61,7 +80,7 @@ const DateFeedScreen = () => {
       onInvite={() => {}}
       onChat={() => {}}
     />
-  );
+  ), [profile]);
 
   if (loading) {
     return (
@@ -87,7 +106,7 @@ const DateFeedScreen = () => {
             <FlatList
               data={dates[['pending','joined','created','public'][idx]]}
               horizontal
-              keyExtractor={d => d.id.toString()}
+              keyExtractor={(d, i) => `${d?.id ?? 'unknown'}-${i}`}
               renderItem={renderDateCard}
               contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8 }}
               ListEmptyComponent={() => <Text style={{ color: '#888', marginLeft: 16 }}>No items.</Text>}

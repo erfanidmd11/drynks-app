@@ -1,6 +1,6 @@
-// LoginScreen.tsx
+// Fully Patched LoginScreen.tsx
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Alert } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Alert, Platform } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../config/supabase';
 
@@ -24,17 +24,23 @@ const LoginScreen = () => {
         Alert.alert('Login Error', error.message);
       }
     } else {
-      Alert.alert('Success', 'Logged in successfully!');
+      Alert.alert('Success', 'Logged in successfully!', [
+        { text: 'OK', onPress: () => navigation.replace('App') }
+      ]);
     }
   };
 
   const handleForgotPassword = async () => {
-    Alert.prompt('Forgot Password', 'Enter your email to reset password', async (inputEmail) => {
-      if (!inputEmail) return;
-      const { error } = await supabase.auth.resetPasswordForEmail(inputEmail);
-      if (error) Alert.alert('Error', error.message);
-      else Alert.alert('Success', 'Password reset email sent.');
-    });
+    if (Platform.OS === 'ios') {
+      Alert.prompt('Forgot Password', 'Enter your email to reset password', async (inputEmail) => {
+        if (!inputEmail) return;
+        const { error } = await supabase.auth.resetPasswordForEmail(inputEmail);
+        if (error) Alert.alert('Error', error.message);
+        else Alert.alert('Success', 'Password reset email sent.');
+      });
+    } else {
+      Alert.alert('Reset Password', 'Please contact support to reset your password.');
+    }
   };
 
   return (

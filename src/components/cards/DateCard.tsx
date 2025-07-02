@@ -1,4 +1,4 @@
-// src/components/DateCard.tsx
+// Fully Patched DateCard.tsx (Simplified — No Event Image)
 import React, { useState } from 'react';
 import {
   View,
@@ -21,10 +21,13 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import { BlurView } from 'expo-blur';
-import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useNavigation } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
+
+const safeImage = (url: string) =>
+  url?.startsWith('http') ? { uri: url } : { uri: 'https://via.placeholder.com/100' };
 
 const DateCard = ({
   date,
@@ -40,21 +43,22 @@ const DateCard = ({
   onChat = () => {},
 }: any) => {
   const navigation = useNavigation();
-  const creator = date.creator || {};
-  const acceptedUsers = date.accepted_users || [];
+  const creator = date?.creator || {};
+  const acceptedUsers = Array.isArray(date?.accepted_users) ? date.accepted_users : [];
   const blurred = !isAccepted && !isCreator;
-  const capacity = date.capacity || 1;
+  const capacity = date?.capacity || 1;
   const remaining = capacity - acceptedUsers.length;
   const isFull = remaining <= 0;
-  const isPast = new Date(date.event_date) < new Date();
+  const eventDate = new Date(date?.event_date ?? '');
+  const isPast = isNaN(eventDate.getTime()) ? false : eventDate < new Date();
 
   const [profileVisible, setProfileVisible] = useState(false);
   const [activeUser, setActiveUser] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
   const allUsers = [
-    { ...date, ...creator, type: 'host', avatar_url: creator.avatar_url || date.image },
-    ...acceptedUsers.map(u => ({ ...u, type: 'guest' }))
+    { ...creator, type: 'host', avatar_url: creator.avatar_url },
+    ...acceptedUsers.map((u) => ({ ...u, type: 'guest' })),
   ];
 
   const scale = useSharedValue(1);
@@ -62,26 +66,26 @@ const DateCard = ({
     transform: [{ scale: scale.value }],
   }));
 
-  const handlePressIn = () => { scale.value = withSpring(0.97); };
-  const handlePressOut = () => { scale.value = withSpring(1); };
+  const handlePressIn = () => {
+    scale.value = withSpring(0.97);
+  };
+  const handlePressOut = () => {
+    scale.value = withSpring(1);
+  };
 
   return (
     <GestureHandlerRootView>
       <Animated.View entering={FadeInDown.duration(400)} style={[styles.card, animatedCardStyle]}>
-        <TouchableWithoutFeedback
-          onPress={onTap}
-          onPressIn={handlePressIn}
-          onPressOut={handlePressOut}
-        >
+        <TouchableWithoutFeedback onPress={onTap} onPressIn={handlePressIn} onPressOut={handlePressOut}>
           <View>
-            <Text style={styles.title}>{date.title}</Text>
-            <Text style={styles.eventDate}>{new Date(date.event_date).toDateString()}</Text>
+            <Text style={styles.title}>{date?.title || 'Untitled Event'}</Text>
+            <Text style={styles.eventDate}>{eventDate.toDateString()}</Text>
             <Text style={styles.meta}>Spots left: {remaining} / {capacity}</Text>
 
             <FlatList
               horizontal
               data={allUsers}
-              keyExtractor={(u, i) => `${u.id}-${i}`}
+              keyExtractor={(u, i) => `${u?.id ?? 'user'}-${i}`}
               renderItem={({ item }) => (
                 <Pressable
                   onPress={() => {
@@ -91,7 +95,7 @@ const DateCard = ({
                     }
                   }}
                 >
-                  <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/100' }} style={styles.avatarCircle} />
+                  <Image source={safeImage(item.avatar_url)} style={styles.avatarCircle} />
                   {!blurred && (
                     <Text style={{ fontSize: 10, textAlign: 'center' }}>{item.type === 'host' ? 'Host' : ''}</Text>
                   )}
@@ -130,12 +134,14 @@ const DateCard = ({
             ) : (
               <ScrollView contentContainerStyle={{ alignItems: 'center', padding: 20 }}>
                 <Image
-                  source={{ uri: activeUser?.avatar_url || 'https://via.placeholder.com/150' }}
+                  source={safeImage(activeUser?.avatar_url)}
                   style={{ width: 100, height: 100, borderRadius: 50, marginBottom: 12 }}
                 />
                 <Text style={styles.name}>{activeUser?.screen_name || 'User'}</Text>
-                <Text style={styles.metaText}>{activeUser?.gender} • Interested in: {activeUser?.preferences?.join(', ')}</Text>
-                <Text style={styles.metaText}>{activeUser?.age} • {activeUser?.location}</Text>
+                <Text style={styles.metaText}>
+                  {activeUser?.gender || 'Unknown'} • Interested in: {(activeUser?.preferences || []).join(', ')}
+                </Text>
+                <Text style={styles.metaText}>{activeUser?.age} • {activeUser?.location || 'Unknown'}</Text>
                 {activeUser?.about && <Text style={styles.aboutText}>{activeUser.about}</Text>}
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 10 }}>
                   {(activeUser?.gallery_photos || []).map((uri: string, i: number) => (

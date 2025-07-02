@@ -1,4 +1,4 @@
-// src/components/AppShell.tsx
+// AppShell.tsx (Crash-Proof and Stable)
 import React from 'react';
 import { View, StyleSheet, StatusBar, Platform } from 'react-native';
 

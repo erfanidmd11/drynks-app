@@ -1,19 +1,8 @@
-// src/screens/Onboarding/SplashScreen.tsx
-import React, { useEffect } from 'react';
+// Fully Cleaned SplashScreen.tsx (Routing Handled by AppNavigator)
+import React from 'react';
 import { View, Text, StyleSheet, Image } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
 
 const SplashScreen = () => {
-  const navigation = useNavigation();
-
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      navigation.replace('Signup');
-    }, 3000); // 3 seconds splash
-
-    return () => clearTimeout(timeout);
-  }, [navigation]);
-
   return (
     <View style={styles.container}>
       <Image
@@ -49,4 +38,3 @@ const styles = StyleSheet.create({
 });
 
 export default SplashScreen;
-

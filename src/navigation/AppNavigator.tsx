@@ -1,5 +1,4 @@
-// AppNavigator.tsx
-
+// Fully Patched AppNavigator.tsx
 import React, { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -23,7 +22,7 @@ const Stack = createNativeStackNavigator();
 
 const AppNavigator = () => {
   const [session, setSession] = useState(null);
-  const [initialRoute, setInitialRoute] = useState('Splash');
+  const [initialRoute, setInitialRoute] = useState<'Splash' | 'App' | string>('Splash');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -36,22 +35,24 @@ const AppNavigator = () => {
         const currentSession = sessionData?.session ?? null;
         setSession(currentSession);
 
-        if (currentSession?.user) {
-          console.log('[INIT] Fetching user profile...');
-          const { data: profile, error: profileError } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', currentSession.user.id)
-            .single();
-
-          if (profileError) throw profileError;
-
-          const nextStep = getNextIncompleteStep(profile);
-          setInitialRoute(nextStep || 'App');
-          console.log('[INIT] Routing to:', nextStep || 'App');
-        } else {
-          setInitialRoute('Splash');
+        if (!currentSession?.user?.id) {
+          setInitialRoute('Login');
+          setLoading(false);
+          return;
         }
+
+        console.log('[INIT] Fetching user profile...');
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', currentSession.user.id)
+          .single();
+
+        if (profileError) throw profileError;
+
+        const nextStep = getNextIncompleteStep(profile);
+        setInitialRoute(nextStep || 'App');
+        console.log('[INIT] Routing to:', nextStep || 'App');
       } catch (error) {
         console.error('[INIT ERROR]', error);
         setInitialRoute('Splash');
@@ -71,21 +72,28 @@ const AppNavigator = () => {
     };
   }, []);
 
-  const getNextIncompleteStep = (profile: any) => {
+  const getNextIncompleteStep = (profile: any): string | null => {
     if (!profile?.birthdate) return 'ProfileSetupStepTwo';
     if (!profile?.first_name || !profile?.username) return 'ProfileSetupStepThree';
     if (!profile?.phone) return 'ProfileSetupStepFour';
     if (!profile?.gender) return 'ProfileSetupStepFive';
-    if (!profile?.preferences?.length) return 'ProfileSetupStepSix';
+
+    const prefs = profile?.preferences;
+    if (!Array.isArray(prefs) || prefs.length === 0) return 'ProfileSetupStepSix';
+
     if (!profile?.agreed_to_terms) return 'ProfileSetupStepSeven';
     if (!profile?.social_handle || !profile?.social_platform) return 'ProfileSetupStepEight';
     if (!profile?.location) return 'ProfileSetupStepNine';
-    if (!profile?.profile_photo || profile?.gallery_photos?.length < 3) return 'ProfileSetupStepTen';
+
+    const gallery = profile?.gallery_photos;
+    if (!profile?.profile_photo || !Array.isArray(gallery) || gallery.length < 3) {
+      return 'ProfileSetupStepTen';
+    }
+
     return null;
   };
 
   if (loading) {
-    console.log('[UI] Loading screen displayed...');
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
         <ActivityIndicator size="large" color="#ff5a5f" />
