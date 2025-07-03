@@ -7,6 +7,11 @@
     "icon": "./assets/images/app_icon.png",
     "scheme": "drynks",
     "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/drYnks_logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "assetBundlePatterns": ["**/*"],
     "jsEngine": "jsc",
     "updates": {
@@ -19,7 +24,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.drynks.app",
-      "buildNumber": "1.0.9",
+      "buildNumber": "1.1.0",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app uses your location to find nearby dates and events.",
         "NSCameraUsageDescription": "This app uses your camera to update your profile photo.",
