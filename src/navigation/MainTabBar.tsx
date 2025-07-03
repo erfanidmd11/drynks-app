@@ -1,13 +1,14 @@
 // Fully Cleaned MainTabBar.tsx
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, Image, StyleSheet } from 'react-native';
+import { View, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import DateFeedScreen from '../screens/Home/DateFeedScreen';
+
+import DateFeedScreen from '@screens/Home/DateFeedScreen';
 import CreateDateScreen from '../screens/Dates/CreateDateScreen';
 import MessagesScreen from '../screens/Messages/MessagesScreen';
 import MyDatesScreen from '../screens/Dates/MyDatesScreen';
-import ProfileMenu from '../components/common/ProfileMenu';
+import ProfileMenu from '@components/common/ProfileMenu';
 
 const Tab = createBottomTabNavigator();
 
@@ -19,31 +20,32 @@ const Logo = () => (
   />
 );
 
+const getIconName = (routeName: string) => {
+  switch (routeName) {
+    case 'Explore':
+      return 'map';
+    case 'My DrYnks':
+      return 'heart';
+    case 'Vibe':
+      return 'chatbubble-ellipses';
+    case 'New Date':
+      return 'add-circle';
+    default:
+      if (__DEV__) {
+        console.warn(`[TabBar] Unknown route: ${routeName}`);
+      }
+      return 'ellipse';
+  }
+};
+
 const MainTabBar = () => {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
-        headerTitle: () => <Logo />, 
+        headerTitle: () => <Logo />,
         headerRight: () => <ProfileMenu />,
         tabBarIcon: ({ color, size }) => {
-          let iconName: string;
-          switch (route.name) {
-            case 'Explore':
-              iconName = 'map';
-              break;
-            case 'My DrYnks':
-              iconName = 'heart';
-              break;
-            case 'Vibe':
-              iconName = 'chatbubble-ellipses';
-              break;
-            case 'New Date':
-              iconName = 'add-circle';
-              break;
-            default:
-              console.warn(`[TabBar] Unknown route: ${route.name}`);
-              iconName = 'ellipse';
-          }
+          const iconName = getIconName(route.name);
           return <Ionicons name={iconName as any} size={size} color={color} />;
         },
         tabBarActiveTintColor: '#ff5a5f',

@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image, FlatList, Alert } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 

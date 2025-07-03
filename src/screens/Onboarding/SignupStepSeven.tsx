@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 

@@ -1,9 +1,17 @@
-// src/screens/Dates/MyDatesScreen.tsx
-
+// MyDatesScreen.tsx – Production Ready
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet, ActivityIndicator, RefreshControl, Alert, TouchableOpacity } from 'react-native';
+import {
+  View,
+  Text,
+  FlatList,
+  StyleSheet,
+  ActivityIndicator,
+  RefreshControl,
+  Alert,
+  TouchableOpacity,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
 import { Ionicons } from '@expo/vector-icons';
 
 const MyDatesScreen = () => {
@@ -13,92 +21,133 @@ const MyDatesScreen = () => {
 
   const fetchDateRequests = useCallback(async () => {
     setLoading(true);
-    const user = (await supabase.auth.getSession()).data.session?.user;
-    if (!user) return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const user = sessionData?.session?.user;
+      if (!user) {
+        setLoading(false);
+        return;
+      }
 
-    const { data, error } = await supabase
-      .from('date_requests')
-      .select()
-      .or(`creator.eq.${user.id},accepted_users.cs.{${user.id}},declined_users.cs.{${user.id}},pending_users.cs.{${user.id}}`)
-      .order('event_date');
+      const { data, error } = await supabase
+        .from('date_requests')
+        .select()
+        .or(`creator.eq.${user.id},accepted_users.cs.{${user.id}},declined_users.cs.{${user.id}},pending_users.cs.{${user.id}}`)
+        .order('event_date');
 
-    if (error) return console.error(error);
-    setDateRequests(data);
-    setLoading(false);
+      if (error) {
+        console.error('[Fetch Date Requests Error]', error);
+        Alert.alert('Error', 'Failed to load dates.');
+      } else {
+        setDateRequests(data);
+      }
+    } catch (err) {
+      console.error('[Fetch Error]', err);
+      Alert.alert('Error', 'Something went wrong.');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   const respondToDate = async (dateId: string, accept: boolean) => {
-    const user = (await supabase.auth.getSession()).data.session?.user;
-    if (!user) return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const user = sessionData?.session?.user;
+      if (!user) return;
 
-    const isEmailProvider = user.identities?.[0]?.provider === 'email';
-    const emailVerified = !!user.email_confirmed_at;
+      const isEmailProvider = user.identities?.[0]?.provider === 'email';
+      const emailVerified = !!user.email_confirmed_at;
 
-    if (isEmailProvider && !emailVerified) {
-      Alert.alert('Email Not Verified', 'Please verify your email to respond to applicants.');
-      return;
+      if (isEmailProvider && !emailVerified) {
+        Alert.alert('Email Not Verified', 'Please verify your email to respond to applicants.');
+        return;
+      }
+
+      const { error } = await supabase.rpc('respond_to_date', {
+        date_id_input: dateId,
+        user_id_input: user.id,
+        accept,
+      });
+
+      if (error) {
+        console.error('[Respond Error]', error);
+        Alert.alert('Error', 'Failed to respond to the date.');
+      } else {
+        fetchDateRequests();
+      }
+    } catch (err) {
+      console.error('[Respond Crash]', err);
+      Alert.alert('Unexpected Error', 'Something went wrong while responding.');
     }
-
-    await supabase.rpc('respond_to_date', {
-      date_id_input: dateId,
-      user_id_input: user.id,
-      accept,
-    });
-
-    fetchDateRequests();
   };
 
   useEffect(() => {
     fetchDateRequests();
   }, [fetchDateRequests]);
 
+  const renderItem = ({ item }: { item: any }) => {
+    const userId = supabase.auth.getUser().then((u) => u.data?.user?.id);
+    const accepted = item.accepted_users?.includes(userId);
+    const declined = item.declined_users?.includes(userId);
+    const pending = item.pending_users?.includes(userId);
+
+    const eventDate = item.event_date
+      ? new Date(item.event_date).toLocaleDateString()
+      : 'No Date';
+
+    return (
+      <TouchableOpacity
+        style={styles.item}
+        onPress={() => navigation.navigate('DateDetails', { dateId: item.id })}
+      >
+        <View style={styles.info}>
+          <Text style={styles.title}>{item.title || 'Untitled'}</Text>
+          <Text style={styles.subtitle}>{`${item.location || ''} • ${eventDate}`}</Text>
+        </View>
+        {accepted ? (
+          <Ionicons name="checkmark-circle" size={24} color="green" />
+        ) : declined ? (
+          <Ionicons name="close-circle" size={24} color="red" />
+        ) : pending ? (
+          <View style={styles.actions}>
+            <TouchableOpacity onPress={() => respondToDate(item.id, false)}>
+              <Ionicons name="close" size={24} color="red" />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => respondToDate(item.id, true)}>
+              <Ionicons name="checkmark" size={24} color="green" />
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <Ionicons name="help-circle-outline" size={24} color="gray" />
+        )}
+      </TouchableOpacity>
+    );
+  };
+
   if (loading) {
-    return <View style={styles.center}><ActivityIndicator size="large" color="#ff5a5f" /></View>;
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#ff5a5f" />
+      </View>
+    );
   }
 
   if (dateRequests.length === 0) {
-    return <View style={styles.center}><Text>No dates found.</Text></View>;
+    return (
+      <View style={styles.center}>
+        <Text>No dates found.</Text>
+      </View>
+    );
   }
 
   return (
     <FlatList
       data={dateRequests}
-      refreshControl={<RefreshControl refreshing={loading} onRefresh={fetchDateRequests} />}
+      refreshControl={
+        <RefreshControl refreshing={loading} onRefresh={fetchDateRequests} />
+      }
       keyExtractor={(item) => item.id.toString()}
-      renderItem={({ item }) => {
-        const userId = supabase.auth.user()?.id;
-        const accepted = item.accepted_users?.includes(userId);
-        const declined = item.declined_users?.includes(userId);
-        const pending = item.pending_users?.includes(userId);
-
-        return (
-          <TouchableOpacity
-            style={styles.item}
-            onPress={() => navigation.navigate('DateDetails', { dateId: item.id })}
-          >
-            <View style={styles.info}>
-              <Text style={styles.title}>{item.title || 'Untitled'}</Text>
-              <Text style={styles.subtitle}>{`${item.location || ''} • ${item.event_date}`}</Text>
-            </View>
-            {accepted ? (
-              <Ionicons name="checkmark-circle" size={24} color="green" />
-            ) : declined ? (
-              <Ionicons name="close-circle" size={24} color="red" />
-            ) : pending ? (
-              <View style={styles.actions}>
-                <TouchableOpacity onPress={() => respondToDate(item.id, false)}>
-                  <Ionicons name="close" size={24} color="red" />
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => respondToDate(item.id, true)}>
-                  <Ionicons name="checkmark" size={24} color="green" />
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <Ionicons name="help-circle-outline" size={24} color="gray" />
-            )}
-          </TouchableOpacity>
-        );
-      }}
+      renderItem={renderItem}
     />
   );
 };

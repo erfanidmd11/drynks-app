@@ -1,10 +1,11 @@
-// Fully Patched AppNavigator.tsx with Login as Initial Screen
+// AppNavigator.tsx – Production Ready & Crash Safe
 import React, { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { supabase } from '../config/supabase';
+import { supabase } from '@config/supabase';
 import LoginScreen from '../screens/Auth/LoginScreen';
 import MainTabBar from './MainTabBar';
+import SignupStepOne from '../screens/Onboarding/SignupStepOne';
 import SignupStepTwo from '../screens/Onboarding/SignupStepTwo';
 import SignupStepThree from '../screens/Onboarding/SignupStepThree';
 import SignupStepFour from '../screens/Onboarding/SignupStepFour';
@@ -21,7 +22,7 @@ const Stack = createNativeStackNavigator();
 
 const AppNavigator = () => {
   const [session, setSession] = useState(null);
-  const [initialRoute, setInitialRoute] = useState<'Splash' | 'Login' | 'App' | string>('Splash');
+  const [initialRoute, setInitialRoute] = useState<'Splash' | string>('Splash');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -35,8 +36,8 @@ const AppNavigator = () => {
         setSession(currentSession);
 
         if (!currentSession?.user?.id) {
-          setInitialRoute('Login');
-          setLoading(false);
+          console.warn('[INIT] No session found, routing to SignupStepOne');
+          setInitialRoute('ProfileSetupStepOne');
           return;
         }
 
@@ -47,14 +48,19 @@ const AppNavigator = () => {
           .eq('id', currentSession.user.id)
           .single();
 
-        if (profileError) throw profileError;
+        if (profileError || !profile) {
+          console.warn('[INIT] Profile error or null, routing to SignupStepOne');
+          setInitialRoute('ProfileSetupStepOne');
+          return;
+        }
 
+        console.log('[INIT] Profile:', profile);
         const nextStep = getNextIncompleteStep(profile);
-        setInitialRoute(nextStep || 'App');
         console.log('[INIT] Routing to:', nextStep || 'App');
+        setInitialRoute(nextStep || 'App');
       } catch (error) {
         console.error('[INIT ERROR]', error);
-        setInitialRoute('Login');
+        setInitialRoute('ProfileSetupStepOne');
       } finally {
         setLoading(false);
       }
@@ -104,6 +110,7 @@ const AppNavigator = () => {
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }} initialRouteName={initialRoute}>
         <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="ProfileSetupStepOne" component={SignupStepOne} />
         <Stack.Screen name="Login" component={LoginScreen} />
         <Stack.Screen name="ProfileSetupStepTwo" component={SignupStepTwo} />
         <Stack.Screen name="ProfileSetupStepThree" component={SignupStepThree} />

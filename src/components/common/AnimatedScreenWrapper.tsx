@@ -1,17 +1,23 @@
-// Patched AnimatedScreenWrapper.tsx with fallback
+// AnimatedScreenWrapper.tsx – Crash Safe & Clean
 import React, { ReactNode } from 'react';
 import { View, StyleSheet } from 'react-native';
-import Animated, { FadeInRight, FadeOutLeft } from 'react-native-reanimated';
+import Animated, {
+  FadeInRight,
+  FadeOutLeft,
+} from 'react-native-reanimated';
 
 interface Props {
   children: ReactNode;
 }
 
 const AnimatedScreenWrapper = ({ children }: Props) => {
+  const EnterAnim = FadeInRight?.(500);
+  const ExitAnim = FadeOutLeft?.(300);
+
   return (
     <Animated.View
-      entering={FadeInRight?.duration?.(500) ?? undefined}
-      exiting={FadeOutLeft?.duration?.(300) ?? undefined}
+      entering={EnterAnim}
+      exiting={ExitAnim}
       style={styles.container}
     >
       {children}

@@ -1,8 +1,7 @@
-// VerifyBanner.tsx
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
 
 const VerifyBanner = ({ profile }: { profile: any }) => {
   const [emailLoading, setEmailLoading] = useState(false);
@@ -13,9 +12,10 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
   const handleEmailVerify = async () => {
     setEmailLoading(true);
     try {
-      await supabase.auth.reauthenticate();
+      const { error } = await supabase.auth.resend({ type: 'email' });
+      if (error) throw error;
       setMessage('📬 Boom! Verification email is flying your way.');
-    } catch (err) {
+    } catch (err: any) {
       setMessage(`❌ Error: ${err.message}`);
     } finally {
       setEmailLoading(false);
@@ -25,9 +25,10 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
   const handlePhoneVerify = async () => {
     setPhoneLoading(true);
     try {
-      await supabase.auth.verifyOtp({ type: 'sms', phone: profile.phone });
+      const { error } = await supabase.auth.verifyOtp({ type: 'sms', phone: profile.phone });
+      if (error) throw error;
       setMessage('📱 Code sent! Check your texts.');
-    } catch (err) {
+    } catch (err: any) {
       setMessage(`❌ Error: ${err.message}`);
     } finally {
       setPhoneLoading(false);
@@ -51,7 +52,9 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
           {emailLoading ? (
             <ActivityIndicator />
           ) : (
-            <TouchableOpacity onPress={handleEmailVerify}><Text style={styles.link}>Send Email</Text></TouchableOpacity>
+            <TouchableOpacity onPress={handleEmailVerify}>
+              <Text style={styles.link}>Send Email</Text>
+            </TouchableOpacity>
           )}
         </View>
       )}
@@ -62,7 +65,9 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
           {phoneLoading ? (
             <ActivityIndicator />
           ) : (
-            <TouchableOpacity onPress={handlePhoneVerify}><Text style={styles.link}>Send Code</Text></TouchableOpacity>
+            <TouchableOpacity onPress={handlePhoneVerify}>
+              <Text style={styles.link}>Send Code</Text>
+            </TouchableOpacity>
           )}
         </View>
       )}

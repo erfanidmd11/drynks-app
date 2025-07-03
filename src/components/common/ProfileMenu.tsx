@@ -1,9 +1,8 @@
-// Crash-Safe ProfileMenu.tsx
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
 
 const ProfileMenu = () => {
   const navigation = useNavigation();
@@ -22,7 +21,7 @@ const ProfileMenu = () => {
 
   return (
     <View style={{ marginRight: 16 }}>
-      <TouchableOpacity onPress={() => setVisible(true)}>
+      <TouchableOpacity onPress={() => setVisible(true)} hitSlop={10}>
         <Image
           source={{ uri: 'https://via.placeholder.com/40' }}
           style={{ width: 32, height: 32, borderRadius: 16 }}
@@ -32,12 +31,22 @@ const ProfileMenu = () => {
         <TouchableOpacity style={styles.overlay} onPress={() => setVisible(false)}>
           <View style={styles.menu}>
             <Text style={styles.title}>Your Profile</Text>
-            <TouchableOpacity onPress={() => {}}><Text style={styles.item}>My Profile</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => {}}><Text style={styles.item}>Edit Profile</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => {}}><Text style={styles.item}>Settings</Text></TouchableOpacity>
-            <TouchableOpacity onPress={handleLogout}><Text style={styles.item}>Logout</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => {}}>
+              <Text style={styles.item}>My Profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => {}}>
+              <Text style={styles.item}>Edit Profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => {}}>
+              <Text style={styles.item}>Settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleLogout}>
+              <Text style={styles.item}>Logout</Text>
+            </TouchableOpacity>
             <View style={styles.divider} />
-            <TouchableOpacity onPress={() => {}}><Text style={styles.hidden}>Delete Profile</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => {}}>
+              <Text style={styles.hidden}>Delete Profile</Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>

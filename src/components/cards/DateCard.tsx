@@ -1,5 +1,5 @@
-// Fully Patched DateCard.tsx (Simplified — No Event Image)
-import React, { useState } from 'react';
+// DateCard.tsx – Production Ready with TouchableOpacity Actions
+import React, { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   Dimensions,
   ScrollView,
   ActivityIndicator,
+  TouchableOpacity,
 } from 'react-native';
 import Animated, {
   FadeInDown,
@@ -20,7 +21,6 @@ import Animated, {
   useAnimatedStyle,
   withSpring,
 } from 'react-native-reanimated';
-import { BlurView } from 'expo-blur';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useNavigation } from '@react-navigation/native';
 
@@ -56,10 +56,10 @@ const DateCard = ({
   const [activeUser, setActiveUser] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
-  const allUsers = [
+  const allUsers = useMemo(() => [
     { ...creator, type: 'host', avatar_url: creator.avatar_url },
     ...acceptedUsers.map((u) => ({ ...u, type: 'guest' })),
-  ];
+  ], [creator, acceptedUsers]);
 
   const scale = useSharedValue(1);
   const animatedCardStyle = useAnimatedStyle(() => ({
@@ -107,15 +107,23 @@ const DateCard = ({
               <View style={styles.actionsRow}>
                 {isPending && (
                   <>
-                    <Text style={styles.actionDecline} onPress={onDecline}>Decline</Text>
-                    <Text style={styles.actionAccept} onPress={onAccept}>Accept</Text>
+                    <TouchableOpacity onPress={onDecline}>
+                      <Text style={styles.actionDecline}>Decline</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={onAccept}>
+                      <Text style={styles.actionAccept}>Accept</Text>
+                    </TouchableOpacity>
                   </>
                 )}
                 {isAccepted && showChat && (
-                  <Text style={styles.actionLink} onPress={onChat}>Join Chat</Text>
+                  <TouchableOpacity onPress={onChat}>
+                    <Text style={styles.actionLink}>Join Chat</Text>
+                  </TouchableOpacity>
                 )}
                 {(isAccepted || isCreator) && (
-                  <Text style={styles.actionLink} onPress={onInvite}>Invite</Text>
+                  <TouchableOpacity onPress={onInvite}>
+                    <Text style={styles.actionLink}>Invite</Text>
+                  </TouchableOpacity>
                 )}
               </View>
             )}
@@ -149,11 +157,10 @@ const DateCard = ({
                   ))}
                 </View>
                 <View style={styles.actionRow}>
-                  <Text style={styles.actionButton}>Message</Text>
-                  <Text style={styles.actionButton}>Invite</Text>
+                  <TouchableOpacity><Text style={styles.actionButton}>Message</Text></TouchableOpacity>
+                  <TouchableOpacity><Text style={styles.actionButton}>Invite</Text></TouchableOpacity>
                 </View>
-                <Text
-                  style={styles.fullProfile}
+                <TouchableOpacity
                   onPress={() => {
                     setProfileVisible(false);
                     setTimeout(() => {
@@ -162,8 +169,12 @@ const DateCard = ({
                       }
                     }, 300);
                   }}
-                >View Full Profile</Text>
-                <Text style={styles.closeButton} onPress={() => setProfileVisible(false)}>Close</Text>
+                >
+                  <Text style={styles.fullProfile}>View Full Profile</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setProfileVisible(false)}>
+                  <Text style={styles.closeButton}>Close</Text>
+                </TouchableOpacity>
               </ScrollView>
             )}
           </View>

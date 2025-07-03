@@ -1,13 +1,42 @@
-// Fully Patched LoginScreen.tsx
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Alert, Platform } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  Image,
+  Alert,
+  Platform,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { supabase } from '../../config/supabase';
+import { supabase } from '@config/supabase';
+
+const getNextIncompleteStep = (profile: any): string | null => {
+  if (!profile?.birthdate) return 'ProfileSetupStepTwo';
+  if (!profile?.first_name || !profile?.username) return 'ProfileSetupStepThree';
+  if (!profile?.phone) return 'ProfileSetupStepFour';
+  if (!profile?.gender) return 'ProfileSetupStepFive';
+  const prefs = profile?.preferences;
+  if (!Array.isArray(prefs) || prefs.length === 0) return 'ProfileSetupStepSix';
+  if (!profile?.agreed_to_terms) return 'ProfileSetupStepSeven';
+  if (!profile?.social_handle || !profile?.social_platform) return 'ProfileSetupStepEight';
+  if (!profile?.location) return 'ProfileSetupStepNine';
+  const gallery = profile?.gallery_photos;
+  if (!profile?.profile_photo || !Array.isArray(gallery) || gallery.length < 3) {
+    return 'ProfileSetupStepTen';
+  }
+  return null;
+};
 
 const LoginScreen = () => {
   const navigation = useNavigation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+
+  useEffect(() => {
+    console.log('[LoginScreen] Mounted');
+  }, []);
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -15,18 +44,43 @@ const LoginScreen = () => {
       return;
     }
 
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    try {
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
 
-    if (error) {
-      if (error.message.includes('Invalid login credentials')) {
-        Alert.alert('Login Failed', 'We couldn’t find your account. Please sign up first.');
-      } else {
-        Alert.alert('Login Error', error.message);
+      if (authError) {
+        if (authError.message.includes('Invalid login credentials')) {
+          Alert.alert('Login Failed', 'We couldn’t find your account. Please sign up first.');
+        } else {
+          Alert.alert('Login Error', authError.message);
+        }
+        return;
       }
-    } else {
-      Alert.alert('Success', 'Logged in successfully!', [
-        { text: 'OK', onPress: () => navigation.replace('App') }
-      ]);
+
+      const userId = authData?.user?.id;
+      if (!userId) {
+        Alert.alert('Login Error', 'User session invalid.');
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (profileError || !profile) {
+        Alert.alert('Login Error', 'Could not retrieve user profile.');
+        return;
+      }
+
+      const nextStep = getNextIncompleteStep(profile);
+      navigation.reset({
+        index: 0,
+        routes: [{ name: nextStep || 'App' }],
+      });
+    } catch (err) {
+      console.error('[Login Error]', err);
+      Alert.alert('Unexpected Error', 'Something went wrong during login.');
     }
   };
 
@@ -46,7 +100,9 @@ const LoginScreen = () => {
   return (
     <View style={styles.container}>
       <Image source={require('../../../assets/images/drYnks_logo.png')} style={styles.logo} />
-      <Text style={styles.title}>Your Plus-One for Yacht Parties, Concerts & the Unexpected.</Text>
+      <Text style={styles.title}>
+        Your Plus-One for Yacht Parties, Concerts & the Unexpected.
+      </Text>
 
       <TextInput
         style={styles.input}
@@ -75,7 +131,7 @@ const LoginScreen = () => {
         <Text style={styles.linkText}>Forgot Password?</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity onPress={() => navigation.navigate('Signup')}> 
+      <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne')}>
         <Text style={styles.signupText}>Don't have an account? Sign up</Text>
       </TouchableOpacity>
     </View>

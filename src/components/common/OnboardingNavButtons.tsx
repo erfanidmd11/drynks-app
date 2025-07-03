@@ -1,4 +1,3 @@
-// OnboardingNavButtons.tsx (Crash-Safe Version)
 import React from 'react';
 import { View, TouchableOpacity, Text, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -11,14 +10,16 @@ interface Props {
 const OnboardingNavButtons = ({ onNext, showBack = true }: Props) => {
   const navigation = useNavigation();
 
+  const canGoBack = showBack && navigation.canGoBack();
+
   return (
     <View style={styles.navRow}>
-      {showBack && navigation.canGoBack() && (
+      {canGoBack && (
         <TouchableOpacity
           style={[styles.button, styles.back]}
           onPress={() => navigation.goBack()}
         >
-          <Text style={styles.buttonText}>Back</Text>
+          <Text style={[styles.buttonText, { color: '#333' }]}>Back</Text>
         </TouchableOpacity>
       )}
       <TouchableOpacity style={styles.button} onPress={onNext}>

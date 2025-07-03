@@ -1,34 +1,59 @@
-// Fully Patched DateFeedScreen.tsx (Crash-Safe)
+// DateFeedScreen.tsx – Final Production Ready
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, FlatList, RefreshControl, ScrollView, Animated } from 'react-native';
+import {
+  View,
+  Text,
+  FlatList,
+  RefreshControl,
+  ScrollView,
+  Animated,
+} from 'react-native';
 import ShimmerPlaceHolder from 'react-native-shimmer-placeholder';
-import { supabase } from '../../config/supabase';
-import AppShell from '../../components/AppShell';
-import DateCard from '../../components/cards/DateCard';
-import VerifyBanner from '../../components/banners/VerifyBanner';
+import { supabase } from '@config/supabase';
+import AppShell from '@components/AppShell';
+import DateCard from '@components/cards/DateCard';
+import VerifyBanner from '@components/banners/VerifyBanner';
 
 const sections = ['Pending Responses', 'Your Joined Dates', 'Your Created Dates', 'Nearby Dates'];
 
 const DateFeedScreen = () => {
   const [profile, setProfile] = useState<any>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [dates, setDates] = useState({ pending: [], joined: [], created: [], public: [] });
   const [loading, setLoading] = useState(true);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
-  const loadProfile = async () => {
+  const loadUserAndProfile = async () => {
     try {
       const { data: userData } = await supabase.auth.getUser();
       const uid = userData?.user?.id;
-      if (!uid) throw new Error('User not authenticated');
-      const { data, error } = await supabase.from('profiles').select().eq('id', uid).single();
-      if (error) throw error;
-      setProfile(data);
+      if (!uid) {
+        console.warn('[Auth] No user ID found');
+        setLoading(false);
+        return;
+      }
+
+      setUserId(uid);
+
+      const { data: profileData, error } = await supabase
+        .from('profiles')
+        .select()
+        .eq('id', uid)
+        .single();
+
+      if (error || !profileData) {
+        console.warn('[Profile Error]', error?.message || 'Profile missing');
+        setLoading(false);
+        return;
+      }
+
+      setProfile(profileData);
     } catch (error) {
-      console.error('[Profile Load Error]', error);
+      console.error('[Load Profile Error]', error);
     }
   };
 
-  const loadDates = async () => {
+  const loadDates = async (uid: string) => {
     try {
       setLoading(true);
       const now = new Date().toISOString();
@@ -37,11 +62,8 @@ const DateFeedScreen = () => {
         .select('*, creator:profiles(*)')
         .gte('event_date', now)
         .order('event_date', { ascending: true });
-      if (error) throw error;
 
-      const { data: userData } = await supabase.auth.getUser();
-      const uid = userData?.user?.id;
-      if (!uid) throw new Error('User not authenticated');
+      if (error) throw error;
 
       const pending = all.filter(d => (d.pending_users || []).includes(uid));
       const joined = all.filter(d => (d.accepted_users || []).includes(uid));
@@ -53,36 +75,55 @@ const DateFeedScreen = () => {
       );
 
       setDates({ pending, joined, created, public: publicDates });
-      Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 600,
+        useNativeDriver: true,
+      }).start();
     } catch (error) {
-      console.error('[Date Load Error]', error);
+      console.error('[Load Dates Error]', error);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadProfile();
-    loadDates();
+    (async () => {
+      await loadUserAndProfile();
+    })();
   }, []);
 
-  const renderDateCard = useCallback(({ item }) => (
-    <DateCard
-      date={item}
-      userId={profile?.id}
-      isCreator={item.creator?.id === profile?.id}
-      isAccepted={(item.accepted_users || []).includes(profile?.id)}
-      isPending={(item.pending_users || []).includes(profile?.id)}
-      showChat={true}
-      onTap={() => {}}
-      onAccept={() => {}}
-      onDecline={() => {}}
-      onInvite={() => {}}
-      onChat={() => {}}
-    />
-  ), [profile]);
+  useEffect(() => {
+    if (userId) {
+      loadDates(userId);
+    }
+  }, [userId]);
 
-  if (loading) {
+  const renderDateCard = useCallback(
+    ({ item }) => {
+      if (!profile?.id) return null;
+
+      return (
+        <DateCard
+          date={item}
+          userId={profile.id}
+          isCreator={item.creator?.id === profile.id}
+          isAccepted={(item.accepted_users || []).includes(profile.id)}
+          isPending={(item.pending_users || []).includes(profile.id)}
+          showChat={true}
+          onTap={() => {}}
+          onAccept={() => {}}
+          onDecline={() => {}}
+          onInvite={() => {}}
+          onChat={() => {}}
+        />
+      );
+    },
+    [profile]
+  );
+
+  if (loading || !profile) {
     return (
       <AppShell currentTab="Home">
         <View style={{ margin: 16 }}>
@@ -96,17 +137,18 @@ const DateFeedScreen = () => {
 
   return (
     <AppShell currentTab="Home">
-      <ScrollView refreshControl={<RefreshControl refreshing={loading} onRefresh={loadDates} />}>
+      <ScrollView refreshControl={<RefreshControl refreshing={loading} onRefresh={() => userId && loadDates(userId)} />}>
         {(!profile?.phone_verified || !profile?.email_verified) && (
           <VerifyBanner profile={profile} />
         )}
+
         {sections.map((sec, idx) => (
           <Animated.View key={sec} style={{ opacity: fadeAnim, marginTop: 24 }}>
             <Text style={{ marginLeft: 16, fontSize: 18, fontWeight: 'bold' }}>{sec}</Text>
             <FlatList
-              data={dates[['pending','joined','created','public'][idx]]}
+              data={dates[['pending', 'joined', 'created', 'public'][idx]] || []}
               horizontal
-              keyExtractor={(d, i) => `${d?.id ?? 'unknown'}-${i}`}
+              keyExtractor={(d, i) => (d?.id ? `${d.id}` : `fallback-${i}`)}
               renderItem={renderDateCard}
               contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8 }}
               ListEmptyComponent={() => <Text style={{ color: '#888', marginLeft: 16 }}>No items.</Text>}

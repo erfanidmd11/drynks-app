@@ -1,7 +1,10 @@
-// CreateDateScreen.tsx
+// CreateDateScreen.tsx – Production Ready
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, ScrollView, StyleSheet, TouchableOpacity, Alert, Button } from 'react-native';
-import { supabase } from '../../config/supabase';
+import {
+  View, Text, TextInput, ScrollView, StyleSheet,
+  TouchableOpacity, Alert, Button, ActivityIndicator
+} from 'react-native';
+import { supabase } from '@config/supabase';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -19,6 +22,7 @@ const CreateDateScreen = () => {
   const [genderPrefs, setGenderPrefs] = useState({ Male: '0', Female: '0', TS: '0' });
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -41,38 +45,61 @@ const CreateDateScreen = () => {
 
   const handleSubmit = async () => {
     if (!title || !location || !date || photos.length === 0) {
-      Alert.alert('Missing info', 'Please fill all required fields and upload at least one photo.');
+      Alert.alert('Missing Info', 'Please fill all required fields and upload at least one photo.');
       return;
     }
 
-    const user = await supabase.auth.getUser();
-    const inviteCode = uuidv4();
+    setLoading(true);
 
-    const dateRequest = {
-      title,
-      location,
-      event_date: date.toISOString(),
-      who_pays: whoPays,
-      spots: parseInt(maxAttendees),
-      preferred_gender_counts: {
-        Male: parseInt(genderPrefs.Male),
-        Female: parseInt(genderPrefs.Female),
-        TS: parseInt(genderPrefs.TS),
-      },
-      creator: user.data.user.id,
-      invite_code: inviteCode,
-      latitude,
-      longitude,
-      photo_urls: photos,
-      profile_photo: profilePhoto,
-      pending_users: [],
-      accepted_users: [],
-      declined_users: []
-    };
+    try {
+      const user = await supabase.auth.getUser();
+      const userId = user?.data?.user?.id;
+      if (!userId) {
+        Alert.alert('Error', 'User not authenticated.');
+        return;
+      }
 
-    const { error } = await supabase.from('date_requests').insert([dateRequest]);
-    if (error) Alert.alert('Error', error.message);
-    else Alert.alert('Success', 'Date posted!');
+      const inviteCode = uuidv4();
+
+      const dateRequest = {
+        title,
+        location,
+        event_date: date.toISOString(),
+        who_pays: whoPays,
+        spots: parseInt(maxAttendees) || 1,
+        preferred_gender_counts: {
+          Male: parseInt(genderPrefs.Male) || 0,
+          Female: parseInt(genderPrefs.Female) || 0,
+          TS: parseInt(genderPrefs.TS) || 0,
+        },
+        creator: userId,
+        invite_code: inviteCode,
+        latitude,
+        longitude,
+        photo_urls: photos,
+        profile_photo: profilePhoto,
+        pending_users: [],
+        accepted_users: [],
+        declined_users: []
+      };
+
+      const { error } = await supabase.from('date_requests').insert([dateRequest]);
+      if (error) throw error;
+
+      Alert.alert('Success', 'Date posted!');
+      setTitle('');
+      setLocation('');
+      setDate(null);
+      setPhotos([]);
+      setProfilePhoto(null);
+      setMaxAttendees('2');
+      setGenderPrefs({ Male: '0', Female: '0', TS: '0' });
+    } catch (err: any) {
+      console.error('[Create Date Error]', err);
+      Alert.alert('Error', err.message || 'Something went wrong.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -97,7 +124,9 @@ const CreateDateScreen = () => {
         />
       )}
 
-      <TouchableOpacity onPress={pickImage} style={styles.button}><Text style={styles.buttonText}>Add Photo</Text></TouchableOpacity>
+      <TouchableOpacity onPress={pickImage} style={styles.button}>
+        <Text style={styles.buttonText}>Add Photo</Text>
+      </TouchableOpacity>
       {photos.map((uri, idx) => (
         <Text key={idx} style={styles.photoText}>{uri}</Text>
       ))}
@@ -129,7 +158,11 @@ const CreateDateScreen = () => {
         />
       ))}
 
-      <Button title="Submit" onPress={handleSubmit} />
+      {loading ? (
+        <ActivityIndicator size="large" color="#ff5a5f" />
+      ) : (
+        <Button title="Submit" onPress={handleSubmit} />
+      )}
     </ScrollView>
   );
 };
