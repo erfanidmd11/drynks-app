@@ -11,7 +11,6 @@ import {
   Keyboard,
   TouchableOpacity,
   ActivityIndicator,
-  Image,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -106,7 +105,6 @@ export default function EnterOtpScreen() {
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View>
-          <Image source={require('../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
           <Text style={styles.label}>Enter the 6-digit OTP sent to your email</Text>
           <TextInput
             placeholder="OTP"
@@ -155,12 +153,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 20,
     backgroundColor: '#fff',
-  },
-  logo: {
-    width: 60,
-    height: 60,
-    alignSelf: 'center',
-    marginBottom: 24,
   },
   input: {
     borderWidth: 1,
