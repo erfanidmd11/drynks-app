@@ -1,7 +1,7 @@
-// Fully Cleaned MainTabBar.tsx
+// src/navigation/MainTabBar.tsx – Production Ready
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, Image } from 'react-native';
+import { Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import DateFeedScreen from '@screens/Home/DateFeedScreen';
@@ -12,6 +12,7 @@ import ProfileMenu from '@components/common/ProfileMenu';
 
 const Tab = createBottomTabNavigator();
 
+// ✅ Corrected path to DrYnks_Y_logo.png relative to this file
 const Logo = () => (
   <Image
     source={require('../../assets/images/DrYnks_Y_logo.png')}

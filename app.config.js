@@ -23,7 +23,7 @@ export default {
     ios: {
       supportsTablet: true,
       bundleIdentifier: "com.drynks.app",
-      buildNumber: "1.3.5",
+      buildNumber: "1.3.6",
       infoPlist: {
         NSLocationWhenInUseUsageDescription: "This app uses your location to find nearby dates and events.",
         NSCameraUsageDescription: "This app uses your camera to update your profile photo.",

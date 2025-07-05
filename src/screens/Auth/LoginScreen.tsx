@@ -1,3 +1,5 @@
+// src/screens/Auth/LoginScreen.tsx
+
 import React, { useEffect, useState } from 'react';
 import {
   View,
@@ -5,9 +7,7 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Image,
   Alert,
-  Platform,
   Keyboard,
   KeyboardAvoidingView,
   TouchableWithoutFeedback,
@@ -97,23 +97,16 @@ const LoginScreen = () => {
   };
 
   const handleForgotPassword = async () => {
-    if (Platform.OS === 'ios') {
-      Alert.prompt('Forgot Password', 'Enter your email to reset password', async (inputEmail) => {
-        if (!inputEmail) return;
-        const { error } = await supabase.auth.resetPasswordForEmail(inputEmail);
-        if (error) Alert.alert('Error', error.message);
-        else Alert.alert('Success', 'Password reset email sent.');
-      });
-    } else {
-      Alert.alert('Reset Password', 'Please contact support to reset your password.');
-    }
+    Alert.alert(
+      'Reset Password',
+      'Please contact support to reset your password or use the Supabase reset email system.'
+    );
   };
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={styles.container}>
-          <Image source={require('../../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
           <Text style={styles.title}>Your Plus-One for Yacht Parties, Concerts & the Unexpected.</Text>
 
           <TextInput
@@ -159,11 +152,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
-  },
-  logo: {
-    width: 100,
-    height: 100,
-    marginBottom: 20,
   },
   title: {
     fontSize: 18,

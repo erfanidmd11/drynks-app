@@ -1,3 +1,5 @@
+// src/screens/Onboarding/SignupStepFour.tsx
+
 import React, { useState } from 'react';
 import {
   View,
@@ -9,7 +11,6 @@ import {
   TouchableWithoutFeedback,
   Keyboard,
   Platform,
-  Image,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { useNavigation } from '@react-navigation/native';
@@ -80,7 +81,6 @@ const SignupStepFour = () => {
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.container}>
-            <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
             <Text style={styles.header}>How Can We Reach You? 📱</Text>
 
             <View style={styles.phoneRow}>
@@ -117,12 +117,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
-  },
-  logo: {
-    width: 60,
-    height: 60,
-    alignSelf: 'center',
-    marginBottom: 24,
   },
   header: {
     fontSize: 22,

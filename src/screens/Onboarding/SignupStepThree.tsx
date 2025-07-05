@@ -7,7 +7,6 @@ import {
   Alert,
   TouchableWithoutFeedback,
   Keyboard,
-  Image,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
@@ -87,7 +86,6 @@ const SignupStepThree = () => {
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.container}>
-            <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
             <Text style={styles.header}>Let’s Put a Name to That Smile 😄</Text>
 
             <TextInput
@@ -121,12 +119,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
-  },
-  logo: {
-    width: 60,
-    height: 60,
-    alignSelf: 'center',
-    marginBottom: 24,
   },
   header: {
     fontSize: 22,

@@ -1,3 +1,5 @@
+// src/screens/Onboarding/SignupStepOne.tsx
+
 import React, { useState } from 'react';
 import {
   View,
@@ -7,7 +9,6 @@ import {
   Alert,
   TouchableOpacity,
   Keyboard,
-  Image,
   KeyboardAvoidingView,
   Platform,
   TouchableWithoutFeedback,
@@ -76,9 +77,6 @@ const SignupStepOne = () => {
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={styles.container}>
-          <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
-            style={styles.logo}
-          />
           <Text style={styles.tagline}>
             Your Plus-One for Yacht Parties, Concerts & the Unexpected.
           </Text>
@@ -149,12 +147,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
-  },
-  logo: {
-    width: 80,
-    height: 80,
-    alignSelf: 'center',
-    marginBottom: 12,
   },
   tagline: {
     textAlign: 'center',
