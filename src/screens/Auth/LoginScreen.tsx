@@ -113,7 +113,7 @@ const LoginScreen = () => {
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={styles.container}>
-          <Image source={require('../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
+          <Image source={require('../../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
           <Text style={styles.title}>Your Plus-One for Yacht Parties, Concerts & the Unexpected.</Text>
 
           <TextInput
