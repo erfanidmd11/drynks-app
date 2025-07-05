@@ -15,8 +15,7 @@ export default {
     assetBundlePatterns: ["**/*"],
     jsEngine: "jsc",
     updates: {
-      fallbackToCacheTimeout: 0,
-      url: "https://u.expo.dev/17db9eb4-372a-41c6-8c69-d19c84c594d4"
+      fallbackToCacheTimeout: 0
     },
     runtimeVersion: {
       policy: "appVersion"
@@ -24,7 +23,7 @@ export default {
     ios: {
       supportsTablet: true,
       bundleIdentifier: "com.drynks.app",
-      buildNumber: "1.1.2",
+      buildNumber: "1.3.4",
       infoPlist: {
         NSLocationWhenInUseUsageDescription: "This app uses your location to find nearby dates and events.",
         NSCameraUsageDescription: "This app uses your camera to update your profile photo.",
@@ -53,9 +52,11 @@ export default {
       SUPABASE_URL: process.env.SUPABASE_URL,
       SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY,
       eas: {
-        projectId: "17db9eb4-372a-41c6-8c69-d19c84c594d4"
+        projectId: "590cfbfa-9c6b-4a56-942d-d2b66609e98d" // ✅ Linked to drynks1
       }
     },
-    owner: "serfanidmd"
+    owner: "drynks1",
+    plugins: ["expo-secure-store"]
   }
-}
+};
+

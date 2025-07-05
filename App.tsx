@@ -41,6 +41,7 @@ export default function App() {
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
           <AppNavigator />
+          {/* ❌ Removed LinkHandler here – now lives inside NavigationContainer */}
         </SafeAreaProvider>
       </GestureHandlerRootView>
     </ErrorBoundary>

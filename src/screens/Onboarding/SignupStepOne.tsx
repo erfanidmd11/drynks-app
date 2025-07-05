@@ -1,20 +1,27 @@
-// SignupStepOne.tsx – Production-Ready and Crash Safe
-import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert, TouchableOpacity, Button } from 'react-native';
+import React, { useState } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  StyleSheet,
+  Alert,
+  TouchableOpacity,
+  Keyboard,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableWithoutFeedback,
+  ActivityIndicator,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
-// import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper'; // Temporarily disabled
-// import OnboardingNavButtons from '../../components/common/OnboardingNavButtons'; // Temporarily disabled
+import { saveCredentials } from '@utils/secureStore';
 
 const SignupStepOne = () => {
   const navigation = useNavigation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    console.log('[SignupStepOne] Mounted');
-  }, []);
 
   const validatePassword = (password: string) => ({
     length: password.length >= 9,
@@ -37,20 +44,24 @@ const SignupStepOne = () => {
 
     try {
       setLoading(true);
-      const { error } = await supabase.auth.signUp({ email, password });
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: null,
+          channel: 'email_otp',
+        },
+      });
 
       if (error) {
         Alert.alert('Signup Error', error.message);
       } else {
-        Alert.alert(
-          'Check Your Inbox 📬',
-          'We’ve sent a verification email to finish setting up your account. Peek in your spam folder if it’s playing hard to get.',
-          [{ text: 'OK', onPress: () => navigation.navigate('ProfileSetupStepTwo') }]
-        );
+        await saveCredentials(email, password);
+        navigation.navigate('EnterOtpScreen', { email, password });
       }
     } catch (err) {
       console.error('[Signup Error]', err);
-      Alert.alert('Unexpected Error', 'Something went wrong.');
+      Alert.alert('Unexpected Error', 'Something went wrong. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -59,49 +70,76 @@ const SignupStepOne = () => {
   const passwordChecks = validatePassword(password);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.header}>Create Your Account</Text>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1 }}
+    >
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.container}>
+          <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
+            style={styles.logo}
+          />
+          <Text style={styles.tagline}>
+            Your Plus-One for Yacht Parties, Concerts & the Unexpected.
+          </Text>
 
-      <TextInput
-        style={styles.input}
-        placeholder="Email"
-        value={email}
-        onChangeText={setEmail}
-        autoCapitalize="none"
-        keyboardType="email-address"
-        placeholderTextColor="#999"
-      />
+          <Text style={styles.header}>Create Your Account</Text>
 
-      <TextInput
-        style={styles.input}
-        placeholder="Password"
-        value={password}
-        onChangeText={setPassword}
-        secureTextEntry
-        placeholderTextColor="#999"
-      />
+          <TextInput
+            style={styles.input}
+            placeholder="Email"
+            value={email}
+            onChangeText={setEmail}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            placeholderTextColor="#999"
+          />
 
-      <View style={styles.checklist}>
-        <Text style={{ color: passwordChecks.length ? 'green' : 'red' }}>
-          {passwordChecks.length ? '✔' : '✖'} At least 9 characters
-        </Text>
-        <Text style={{ color: passwordChecks.uppercase ? 'green' : 'red' }}>
-          {passwordChecks.uppercase ? '✔' : '✖'} One uppercase letter
-        </Text>
-        <Text style={{ color: passwordChecks.number ? 'green' : 'red' }}>
-          {passwordChecks.number ? '✔' : '✖'} One number
-        </Text>
-        <Text style={{ color: passwordChecks.special ? 'green' : 'red' }}>
-          {passwordChecks.special ? '✔' : '✖'} One special character
-        </Text>
-      </View>
+          <TextInput
+            style={styles.input}
+            placeholder="Password"
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry
+            placeholderTextColor="#999"
+          />
 
-      <Button title="Continue" onPress={handleNext} disabled={loading} />
+          <View style={styles.checklist}>
+            <Text style={{ color: passwordChecks.length ? 'green' : 'red' }}>
+              {passwordChecks.length ? '✔' : '✖'} At least 9 characters
+            </Text>
+            <Text style={{ color: passwordChecks.uppercase ? 'green' : 'red' }}>
+              {passwordChecks.uppercase ? '✔' : '✖'} One uppercase letter
+            </Text>
+            <Text style={{ color: passwordChecks.number ? 'green' : 'red' }}>
+              {passwordChecks.number ? '✔' : '✖'} One number
+            </Text>
+            <Text style={{ color: passwordChecks.special ? 'green' : 'red' }}>
+              {passwordChecks.special ? '✔' : '✖'} One special character
+            </Text>
+          </View>
 
-      <TouchableOpacity onPress={() => navigation.navigate('Login')} disabled={loading}>
-        <Text style={styles.loginLink}>Already have an account? Log in</Text>
-      </TouchableOpacity>
-    </View>
+          <TouchableOpacity
+            style={styles.continueButton}
+            onPress={handleNext}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.continueText}>Continue</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={() => navigation.navigate('Login')} disabled={loading}>
+            <Text style={styles.loginLink}>
+              Already have an account?{' '}
+              <Text style={styles.loginHighlight}>Log in</Text>
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -111,6 +149,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
+  },
+  logo: {
+    width: 80,
+    height: 80,
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  tagline: {
+    textAlign: 'center',
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 20,
+    paddingHorizontal: 10,
   },
   header: {
     fontSize: 22,
@@ -130,10 +181,26 @@ const styles = StyleSheet.create({
   checklist: {
     marginBottom: 20,
   },
+  continueButton: {
+    backgroundColor: '#ff5a5f',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  continueText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
   loginLink: {
     textAlign: 'center',
-    color: '#007bff',
-    marginTop: 10,
+    fontSize: 14,
+    color: '#555',
+  },
+  loginHighlight: {
+    color: '#007AFF',
+    fontWeight: '600',
   },
 });
 

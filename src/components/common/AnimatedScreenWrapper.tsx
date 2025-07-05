@@ -1,4 +1,3 @@
-// AnimatedScreenWrapper.tsx – Crash Safe & Clean
 import React, { ReactNode } from 'react';
 import { View, StyleSheet } from 'react-native';
 import Animated, {
@@ -11,8 +10,8 @@ interface Props {
 }
 
 const AnimatedScreenWrapper = ({ children }: Props) => {
-  const EnterAnim = FadeInRight?.(500);
-  const ExitAnim = FadeOutLeft?.(300);
+  const EnterAnim = FadeInRight.duration(500);
+  const ExitAnim = FadeOutLeft.duration(300);
 
   return (
     <Animated.View

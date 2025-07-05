@@ -8,6 +8,9 @@ import {
   Image,
   Alert,
   Platform,
+  Keyboard,
+  KeyboardAvoidingView,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -48,7 +51,7 @@ const LoginScreen = () => {
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
 
       if (authError) {
-        if (authError.message.includes('Invalid login credentials')) {
+        if (authError.message.toLowerCase().includes('invalid login credentials')) {
           Alert.alert('Login Failed', 'We couldn’t find your account. Please sign up first.');
         } else {
           Alert.alert('Login Error', authError.message);
@@ -62,15 +65,24 @@ const LoginScreen = () => {
         return;
       }
 
-      const { data: profile, error: profileError } = await supabase
+      let { data: profile, error: profileError } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', userId)
         .single();
 
       if (profileError || !profile) {
-        Alert.alert('Login Error', 'Could not retrieve user profile.');
-        return;
+        console.warn('[LoginScreen] No profile found. Creating...');
+        const { error: createError } = await supabase
+          .from('profiles')
+          .upsert({ id: userId });
+
+        if (createError) {
+          Alert.alert('Login Error', 'Could not create profile.');
+          return;
+        }
+
+        profile = { id: userId };
       }
 
       const nextStep = getNextIncompleteStep(profile);
@@ -98,43 +110,45 @@ const LoginScreen = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <Image source={require('../../../assets/images/drYnks_logo.png')} style={styles.logo} />
-      <Text style={styles.title}>
-        Your Plus-One for Yacht Parties, Concerts & the Unexpected.
-      </Text>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.container}>
+          <Image source={require('../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
+          <Text style={styles.title}>Your Plus-One for Yacht Parties, Concerts & the Unexpected.</Text>
 
-      <TextInput
-        style={styles.input}
-        placeholder="Email"
-        placeholderTextColor="#999"
-        keyboardType="email-address"
-        autoCapitalize="none"
-        value={email}
-        onChangeText={setEmail}
-      />
+          <TextInput
+            style={styles.input}
+            placeholder="Email"
+            placeholderTextColor="#999"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            value={email}
+            onChangeText={setEmail}
+          />
 
-      <TextInput
-        style={styles.input}
-        placeholder="Password"
-        placeholderTextColor="#999"
-        secureTextEntry
-        value={password}
-        onChangeText={setPassword}
-      />
+          <TextInput
+            style={styles.input}
+            placeholder="Password"
+            placeholderTextColor="#999"
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+          />
 
-      <TouchableOpacity style={styles.button} onPress={handleLogin}>
-        <Text style={styles.buttonText}>Login</Text>
-      </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={handleLogin}>
+            <Text style={styles.buttonText}>Login</Text>
+          </TouchableOpacity>
 
-      <TouchableOpacity onPress={handleForgotPassword}>
-        <Text style={styles.linkText}>Forgot Password?</Text>
-      </TouchableOpacity>
+          <TouchableOpacity onPress={handleForgotPassword}>
+            <Text style={styles.linkText}>Forgot Password?</Text>
+          </TouchableOpacity>
 
-      <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne')}>
-        <Text style={styles.signupText}>Don't have an account? Sign up</Text>
-      </TouchableOpacity>
-    </View>
+          <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne')}>
+            <Text style={styles.signupText}>Don't have an account? <Text style={styles.signupHighlight}>Sign up</Text></Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -187,8 +201,13 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   signupText: {
-    color: '#007BFF',
+    color: '#333',
     marginTop: 10,
+    fontSize: 14,
+  },
+  signupHighlight: {
+    color: '#007AFF',
+    fontWeight: '600',
   },
 });
 

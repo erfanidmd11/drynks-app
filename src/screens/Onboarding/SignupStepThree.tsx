@@ -1,6 +1,16 @@
-// SignupStepThree.tsx – Production Ready
 import React, { useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  StyleSheet,
+  Alert,
+  TouchableWithoutFeedback,
+  Keyboard,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
@@ -9,7 +19,7 @@ import OnboardingNavButtons from '@components/common/OnboardingNavButtons';
 const SignupStepThree = () => {
   const navigation = useNavigation();
   const [firstName, setFirstName] = useState('');
-  const [username, setUsername] = useState('');
+  const [screenname, setScreenname] = useState('');
 
   const generateSuggestions = (base: string) => {
     const suffix = Math.floor(Math.random() * 1000);
@@ -18,9 +28,9 @@ const SignupStepThree = () => {
 
   const handleNext = async () => {
     const trimmedFirstName = firstName.trim();
-    const trimmedUsername = username.trim();
+    const trimmedScreenname = screenname.trim();
 
-    if (!trimmedFirstName || !trimmedUsername) {
+    if (!trimmedFirstName || !trimmedScreenname) {
       Alert.alert('Missing Info', 'Both your first name and screenname are required.');
       return;
     }
@@ -28,18 +38,18 @@ const SignupStepThree = () => {
     try {
       const { data: existing, error: queryError } = await supabase
         .from('profiles')
-        .select('username')
-        .eq('username', trimmedUsername);
+        .select('screenname')
+        .eq('screenname', trimmedScreenname);
 
       if (queryError) {
-        Alert.alert('Error', 'Could not check username availability.');
+        Alert.alert('Error', 'Could not check screenname availability.');
         return;
       }
 
       if (existing && existing.length > 0) {
-        const suggestions = generateSuggestions(trimmedUsername);
+        const suggestions = generateSuggestions(trimmedScreenname);
         Alert.alert(
-          'Username Taken',
+          'Screenname Taken',
           `That one's already in use. Try one of these:\n- ${suggestions[0]}\n- ${suggestions[1]}\n- ${suggestions[2]}`
         );
         return;
@@ -54,7 +64,7 @@ const SignupStepThree = () => {
       const { error: upsertError } = await supabase.from('profiles').upsert({
         id: userData.user.id,
         first_name: trimmedFirstName,
-        username: trimmedUsername,
+        screenname: trimmedScreenname,
         current_step: 'ProfileSetupStepThree',
       });
 
@@ -71,28 +81,36 @@ const SignupStepThree = () => {
 
   return (
     <AnimatedScreenWrapper>
-      <View style={styles.container}>
-        <Text style={styles.header}>Let’s Put a Name to That Smile 😄</Text>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.container}>
+            <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
+            <Text style={styles.header}>Let’s Put a Name to That Smile 😄</Text>
 
-        <TextInput
-          style={styles.input}
-          placeholder="First Name"
-          value={firstName}
-          onChangeText={setFirstName}
-          placeholderTextColor="#999"
-        />
+            <TextInput
+              style={styles.input}
+              placeholder="First Name"
+              value={firstName}
+              onChangeText={setFirstName}
+              placeholderTextColor="#999"
+            />
 
-        <TextInput
-          style={styles.input}
-          placeholder="Screenname (must be unique)"
-          value={username}
-          onChangeText={setUsername}
-          autoCapitalize="none"
-          placeholderTextColor="#999"
-        />
+            <TextInput
+              style={styles.input}
+              placeholder="Screenname (must be unique)"
+              value={screenname}
+              onChangeText={setScreenname}
+              autoCapitalize="none"
+              placeholderTextColor="#999"
+            />
 
-        <OnboardingNavButtons onNext={handleNext} />
-      </View>
+            <OnboardingNavButtons onNext={handleNext} />
+          </View>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
     </AnimatedScreenWrapper>
   );
 };
@@ -103,6 +121,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
+  },
+  logo: {
+    width: 60,
+    height: 60,
+    alignSelf: 'center',
+    marginBottom: 24,
   },
   header: {
     fontSize: 22,

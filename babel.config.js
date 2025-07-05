@@ -11,6 +11,7 @@ module.exports = function(api) {
             "@components": "./src/components",
             "@screens": "./src/screens",
             "@config": "./src/config",
+            "@utils": "./src/utils",       // ✅ Now included
             "@assets": "./assets"
           }
         }

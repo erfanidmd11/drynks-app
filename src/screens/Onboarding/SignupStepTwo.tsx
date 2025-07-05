@@ -1,6 +1,16 @@
- // SignupStepTwo.tsx – Production Ready
 import React, { useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  StyleSheet,
+  Alert,
+  Keyboard,
+  TouchableWithoutFeedback,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
@@ -9,6 +19,23 @@ import OnboardingNavButtons from '@components/common/OnboardingNavButtons';
 const SignupStepTwo = () => {
   const navigation = useNavigation();
   const [dob, setDob] = useState('');
+
+  const formatDob = (input: string) => {
+    const digitsOnly = input.replace(/[^\d]/g, '');
+    let formatted = '';
+
+    if (digitsOnly.length <= 2) {
+      formatted = digitsOnly;
+    } else if (digitsOnly.length <= 4) {
+      formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2)}`;
+    } else if (digitsOnly.length <= 8) {
+      formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2, 4)}/${digitsOnly.slice(4)}`;
+    } else {
+      formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2, 4)}/${digitsOnly.slice(4, 8)}`;
+    }
+
+    setDob(formatted);
+  };
 
   const handleNext = async () => {
     const [month, day, year] = dob.split('/').map(Number);
@@ -58,21 +85,32 @@ const SignupStepTwo = () => {
 
   return (
     <AnimatedScreenWrapper>
-      <View style={styles.container}>
-        <Text style={styles.header}>Your Birthday 🎂</Text>
-        <Text style={styles.subtext}>Let’s make sure you’re old enough to sip on DrYnks.</Text>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.container}>
+            <Image source={require('../../../assets/images/DrYnks_Y_logo.png')} style={styles.logo} />
+            <Text style={styles.header}>Your Birthday 🎂</Text>
+            <Text style={styles.subtext}>Let’s make sure you’re old enough to sip on DrYnks.</Text>
 
-        <TextInput
-          style={styles.input}
-          placeholder="MM/DD/YYYY"
-          value={dob}
-          onChangeText={setDob}
-          keyboardType="numbers-and-punctuation"
-          placeholderTextColor="#999"
-        />
+            <TextInput
+              style={styles.input}
+              placeholder="MM/DD/YYYY"
+              value={dob}
+              onChangeText={formatDob}
+              keyboardType="number-pad"
+              placeholderTextColor="#999"
+              maxLength={10}
+              returnKeyType="done"
+              blurOnSubmit={true}
+            />
 
-        <OnboardingNavButtons onNext={handleNext} />
-      </View>
+            <OnboardingNavButtons onNext={handleNext} />
+          </View>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
     </AnimatedScreenWrapper>
   );
 };
@@ -83,6 +121,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
     backgroundColor: '#fff',
+  },
+  logo: {
+    width: 60,
+    height: 60,
+    alignSelf: 'center',
+    marginBottom: 24,
   },
   header: {
     fontSize: 22,
