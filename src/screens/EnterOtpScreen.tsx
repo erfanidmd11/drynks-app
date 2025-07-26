@@ -11,6 +11,7 @@ import {
   Keyboard,
   TouchableOpacity,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -70,7 +71,11 @@ export default function EnterOtpScreen() {
 
       const userId = signInData?.user?.id;
       if (userId) {
-        await supabase.from('profiles').upsert({ id: userId });
+        await supabase.from('profiles').upsert({
+          id: userId,
+          email,
+          current_step: 'ProfileSetupStepTwo',
+        });
       }
 
       await clearCredentials();
@@ -105,6 +110,16 @@ export default function EnterOtpScreen() {
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View>
+          <Image
+            source={require('@assets/images/DrYnks_Y_logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+
           <Text style={styles.label}>Enter the 6-digit OTP sent to your email</Text>
           <TextInput
             placeholder="OTP"
@@ -153,6 +168,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 20,
     backgroundColor: '#fff',
+  },
+  logo: {
+    width: 80,
+    height: 80,
+    alignSelf: 'center',
+    marginBottom: 20,
+  },
+  backButton: {
+    marginBottom: 16,
+  },
+  backText: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '500',
   },
   input: {
     borderWidth: 1,

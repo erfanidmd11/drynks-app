@@ -38,11 +38,12 @@ const LinkHandler = () => {
               return;
             }
 
-            profile = { id: user.id }; // ensure fallback
+            profile = { id: user.id }; // fallback profile object
           }
 
           const step = getNextIncompleteStep(profile);
           console.log('[DeepLink] Routing to:', step || 'App');
+
           navigation.reset({
             index: 0,
             routes: [{ name: step || 'App' }],
@@ -68,7 +69,7 @@ const LinkHandler = () => {
 
 const getNextIncompleteStep = (profile: any): string | null => {
   if (!profile?.birthdate) return 'ProfileSetupStepTwo';
-  if (!profile?.first_name || !profile?.username) return 'ProfileSetupStepThree';
+  if (!profile?.first_name || !profile?.screenname) return 'ProfileSetupStepThree';
   if (!profile?.phone) return 'ProfileSetupStepFour';
   if (!profile?.gender) return 'ProfileSetupStepFive';
   const prefs = profile?.preferences;

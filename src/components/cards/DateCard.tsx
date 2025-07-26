@@ -1,246 +1,261 @@
-// DateCard.tsx – Production Ready with TouchableOpacity Actions
-import React, { useState, useMemo } from 'react';
+// Final DateCard.tsx with Supabase RPC notification integration using fetch
+
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
   Image,
-  TouchableWithoutFeedback,
   StyleSheet,
-  FlatList,
-  Pressable,
-  Modal,
-  Linking,
   Dimensions,
-  ScrollView,
-  ActivityIndicator,
   TouchableOpacity,
+  FlatList,
+  Alert
 } from 'react-native';
-import Animated, {
-  FadeInDown,
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-} from 'react-native-reanimated';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
+const HEIGHT = Math.round(width / 1.618);
 
-const safeImage = (url: string) =>
-  url?.startsWith('http') ? { uri: url } : { uri: 'https://via.placeholder.com/100' };
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_WHITE = '#FFFFFF';
 
-const DateCard = ({
-  date,
-  userId,
-  isCreator,
-  isAccepted,
-  isPending,
-  showChat,
-  onTap = () => {},
-  onAccept = () => {},
-  onDecline = () => {},
-  onInvite = () => {},
-  onChat = () => {},
-}: any) => {
+const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAccept, onDecline, onInvite, onChat }) => {
   const navigation = useNavigation();
-  const creator = date?.creator || {};
-  const acceptedUsers = Array.isArray(date?.accepted_users) ? date.accepted_users : [];
-  const blurred = !isAccepted && !isCreator;
-  const capacity = date?.capacity || 1;
-  const remaining = capacity - acceptedUsers.length;
-  const isFull = remaining <= 0;
-  const eventDate = new Date(date?.event_date ?? '');
-  const isPast = isNaN(eventDate.getTime()) ? false : eventDate < new Date();
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const flatListRef = useRef();
 
-  const [profileVisible, setProfileVisible] = useState(false);
-  const [activeUser, setActiveUser] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const eventDate = new Date(date?.event_date);
+  const isPast = eventDate < new Date();
 
-  const allUsers = useMemo(() => [
-    { ...creator, type: 'host', avatar_url: creator.avatar_url },
-    ...acceptedUsers.map((u) => ({ ...u, type: 'guest' })),
-  ], [creator, acceptedUsers]);
+  const accepted = date.accepted_profiles || [];
+  const available = date.preferred_gender_counts || {};
+  const remaining = date.remaining_gender_counts || {};
 
-  const scale = useSharedValue(1);
-  const animatedCardStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scale.value }],
-  }));
+  const gallery = [
+    ...(date.profile_photo ? [{ type: 'event', photo: date.profile_photo }] : []),
+    date.creator_profile ? { type: 'creator', profile: date.creator_profile } : null,
+    ...accepted.filter(p => p).map(p => ({ type: 'accepted', profile: p })),
+  ].filter(Boolean);
 
-  const handlePressIn = () => {
-    scale.value = withSpring(0.97);
-  };
-  const handlePressOut = () => {
-    scale.value = withSpring(1);
+  const handleScroll = e => {
+    const index = Math.round(e.nativeEvent.contentOffset.x / width);
+    setCurrentIndex(index);
   };
 
-  return (
-    <GestureHandlerRootView>
-      <Animated.View entering={FadeInDown.duration(400)} style={[styles.card, animatedCardStyle]}>
-        <TouchableWithoutFeedback onPress={onTap} onPressIn={handlePressIn} onPressOut={handlePressOut}>
-          <View>
-            <Text style={styles.title}>{date?.title || 'Untitled Event'}</Text>
-            <Text style={styles.eventDate}>{eventDate.toDateString()}</Text>
-            <Text style={styles.meta}>Spots left: {remaining} / {capacity}</Text>
+  const notifyServer = async (action) => {
+    try {
+      const response = await fetch('https://your-api-host/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date_id: date.id, actor_id: userId, action })
+      });
 
-            <FlatList
-              horizontal
-              data={allUsers}
-              keyExtractor={(u, i) => `${u?.id ?? 'user'}-${i}`}
-              renderItem={({ item }) => (
-                <Pressable
-                  onPress={() => {
-                    if (!blurred) {
-                      setActiveUser(item);
-                      setProfileVisible(true);
-                    }
-                  }}
-                >
-                  <Image source={safeImage(item.avatar_url)} style={styles.avatarCircle} />
-                  {!blurred && (
-                    <Text style={{ fontSize: 10, textAlign: 'center' }}>{item.type === 'host' ? 'Host' : ''}</Text>
-                  )}
-                </Pressable>
-              )}
-            />
+      if (!response.ok) throw new Error('Notification failed');
+    } catch (error) {
+      console.error('Notification error:', error);
+    }
+  };
 
-            {!isPast && !isFull && (
-              <View style={styles.actionsRow}>
-                {isPending && (
-                  <>
-                    <TouchableOpacity onPress={onDecline}>
-                      <Text style={styles.actionDecline}>Decline</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={onAccept}>
-                      <Text style={styles.actionAccept}>Accept</Text>
-                    </TouchableOpacity>
-                  </>
-                )}
-                {isAccepted && showChat && (
-                  <TouchableOpacity onPress={onChat}>
-                    <Text style={styles.actionLink}>Join Chat</Text>
-                  </TouchableOpacity>
-                )}
-                {(isAccepted || isCreator) && (
-                  <TouchableOpacity onPress={onInvite}>
-                    <Text style={styles.actionLink}>Invite</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            )}
+  const handleAccept = async () => {
+    await notifyServer('accepted');
+    Alert.alert('🎉 Success', 'You’ve joined this date! The host will be notified.');
+    onAccept && onAccept();
+  };
 
-            {isPast && <Text style={styles.pastTag}>This date has passed</Text>}
-            {isFull && !isAccepted && !isCreator && <Text style={styles.pastTag}>This date is full</Text>}
-          </View>
-        </TouchableWithoutFeedback>
-      </Animated.View>
+  const handleRequest = async () => {
+    await notifyServer('requested');
+    Alert.alert('🎉 Request Sent', 'Your interest has been shared. The host will be notified.');
+    onAccept && onAccept();
+  };
 
-      <Modal visible={profileVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.profileModal}>
-            {loading ? (
-              <ActivityIndicator size="large" color="#ff5a5f" />
-            ) : (
-              <ScrollView contentContainerStyle={{ alignItems: 'center', padding: 20 }}>
-                <Image
-                  source={safeImage(activeUser?.avatar_url)}
-                  style={{ width: 100, height: 100, borderRadius: 50, marginBottom: 12 }}
-                />
-                <Text style={styles.name}>{activeUser?.screen_name || 'User'}</Text>
-                <Text style={styles.metaText}>
-                  {activeUser?.gender || 'Unknown'} • Interested in: {(activeUser?.preferences || []).join(', ')}
-                </Text>
-                <Text style={styles.metaText}>{activeUser?.age} • {activeUser?.location || 'Unknown'}</Text>
-                {activeUser?.about && <Text style={styles.aboutText}>{activeUser.about}</Text>}
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 10 }}>
-                  {(activeUser?.gallery_photos || []).map((uri: string, i: number) => (
-                    <Image key={i} source={{ uri }} style={styles.galleryPhoto} />
-                  ))}
-                </View>
-                <View style={styles.actionRow}>
-                  <TouchableOpacity><Text style={styles.actionButton}>Message</Text></TouchableOpacity>
-                  <TouchableOpacity><Text style={styles.actionButton}>Invite</Text></TouchableOpacity>
-                </View>
-                <TouchableOpacity
-                  onPress={() => {
-                    setProfileVisible(false);
-                    setTimeout(() => {
-                      if (activeUser?.id) {
-                        Linking.openURL(`/profile/${activeUser.id}`);
-                      }
-                    }, 300);
-                  }}
-                >
-                  <Text style={styles.fullProfile}>View Full Profile</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setProfileVisible(false)}>
-                  <Text style={styles.closeButton}>Close</Text>
-                </TouchableOpacity>
-              </ScrollView>
-            )}
+  const renderItem = ({ item }) => {
+    if (item.type === 'event') {
+      return (
+        <View style={styles.imageWrapper}>
+          <Image source={{ uri: item.photo }} style={styles.image} />
+          <LinearGradient colors={["transparent", "rgba(0,0,0,0.6)"]} style={styles.overlay} />
+          <View style={styles.textOverlay}>
+            <Text style={styles.title}>{date.title}</Text>
+            <Text style={styles.subtitle}>{date.location} • {eventDate.toDateString()}</Text>
+            {date.distance_km && <Text style={styles.subtitle}>{date.distance_km.toFixed(1)} km away</Text>}
+            <Text style={styles.meta}>Hosted by: {date.creator_profile?.screen_name}</Text>
+            <Text style={styles.meta}>Orientation: {date.orientation_preference?.join(', ')}</Text>
+            <Text style={styles.meta}>Availability:</Text>
+            {['Female', 'Male', 'TS'].map(g => (
+              <Text key={g} style={styles.meta}>
+                • {g}: {remaining[g] || 0}/{available[g] || 0}
+              </Text>
+            ))}
           </View>
         </View>
-      </Modal>
-    </GestureHandlerRootView>
+      );
+    } else {
+      const p = item.profile;
+      if (!p || !p.avatar_url) return null;
+
+      return (
+        <TouchableOpacity style={styles.imageWrapper} onPress={() => navigation.navigate('Profile', { userId: p.id })}>
+          <Image source={{ uri: p.avatar_url }} style={styles.image} />
+          <LinearGradient colors={["transparent", "rgba(0,0,0,0.6)"]} style={styles.overlay} />
+          <View style={styles.textOverlay}>
+            <Text style={styles.title}>{p.screen_name || 'Unknown'}, {p.age || '?'} </Text>
+            <Text style={styles.meta}>{p.location || '—'}</Text>
+            <Text style={styles.meta}>{p.gender || '—'} • {p.orientation || '—'}</Text>
+            <Text style={styles.meta}>Into: {(p.prefers || []).join(', ') || '—'}</Text>
+          </View>
+        </TouchableOpacity>
+      );
+    }
+  };
+
+  if (dismissed) return null;
+
+  return (
+    <View style={styles.card}>
+      <FlatList
+        ref={flatListRef}
+        horizontal
+        pagingEnabled
+        snapToAlignment="center"
+        decelerationRate="fast"
+        data={gallery}
+        keyExtractor={(_, i) => i.toString()}
+        renderItem={renderItem}
+        showsHorizontalScrollIndicator={false}
+        onScroll={handleScroll}
+      />
+      <View style={styles.dotsContainer}>
+        {gallery.map((_, i) => (
+          <View key={i} style={[styles.dot, currentIndex === i && styles.activeDot]} />
+        ))}
+      </View>
+
+      {!isPast && !disabled && !isAccepted && !isCreator && (
+        <View style={styles.buttonRow}>
+          <TouchableOpacity onPress={() => setDismissed(true)} style={styles.outlineBtn}>
+            <Text style={styles.outlineText}>Not Interested 🙅</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={handleRequest} style={styles.primaryBtn}>
+            <Text style={styles.primaryText}>Request to Join 🎉</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {isAccepted && (
+        <TouchableOpacity onPress={onChat} style={[styles.primaryBtn, { alignSelf: 'center' }]}>
+          <Text style={styles.primaryText}>Join Chat 💬</Text>
+        </TouchableOpacity>
+      )}
+
+      {isPast && <Text style={styles.notice}>🍷 This date is in the past</Text>}
+      {disabled && !isAccepted && <Text style={styles.notice}>🙅 This date is full</Text>}
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  avatarCircle: { width: 32, height: 32, borderRadius: 16, marginRight: 6 },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  profileModal: {
-    width: width * 0.85,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    paddingVertical: 20,
-    alignItems: 'center',
-    maxHeight: '80%',
-  },
-  name: { fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
-  metaText: { fontSize: 14, color: '#555', marginVertical: 2 },
-  aboutText: { fontSize: 14, fontStyle: 'italic', color: '#666', marginVertical: 10, textAlign: 'center' },
-  galleryPhoto: { width: 60, height: 60, borderRadius: 8, margin: 4 },
-  fullProfile: { marginTop: 16, color: '#007BFF', fontWeight: '600' },
-  closeButton: { marginTop: 10, color: '#888' },
-  actionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    marginTop: 20,
-  },
-  actionButton: {
-    backgroundColor: '#ff5a5f',
-    color: '#fff',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    overflow: 'hidden',
-    fontWeight: '600',
-  },
   card: {
+    backgroundColor: DRYNKS_WHITE,
+    borderRadius: 20,
     marginVertical: 12,
-    marginHorizontal: 16,
-    padding: 16,
-    borderRadius: 16,
-    backgroundColor: '#fff',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
-    shadowRadius: 8,
+    shadowRadius: 10,
     elevation: 5,
   },
-  title: { fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
-  eventDate: { fontSize: 14, color: '#666', marginBottom: 4 },
-  meta: { fontSize: 12, color: '#999', marginBottom: 12 },
-  actionsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
-  actionLink: { color: '#007AFF', fontWeight: '600' },
-  actionAccept: { color: 'green', fontWeight: '600' },
-  actionDecline: { color: 'red', fontWeight: '600' },
-  pastTag: { color: '#888', fontStyle: 'italic', marginTop: 10 },
+  imageWrapper: {
+    width,
+    height: HEIGHT,
+    position: 'relative',
+  },
+  image: {
+    width: '100%',
+    height: '100%',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  textOverlay: {
+    position: 'absolute',
+    bottom: 20,
+    left: 16,
+    right: 16,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: DRYNKS_WHITE,
+  },
+  subtitle: {
+    fontSize: 13,
+    color: '#ddd',
+  },
+  meta: {
+    fontSize: 12,
+    color: '#ccc',
+    marginTop: 1,
+  },
+  dotsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    paddingTop: 6,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#ccc',
+    margin: 3,
+  },
+  activeDot: {
+    backgroundColor: DRYNKS_RED,
+    width: 8,
+    height: 8,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingHorizontal: 10,
+    paddingBottom: 14,
+    gap: 10,
+  },
+  outlineBtn: {
+    borderColor: DRYNKS_RED,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  outlineText: {
+    color: DRYNKS_RED,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  primaryBtn: {
+    backgroundColor: DRYNKS_RED,
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  primaryText: {
+    color: DRYNKS_WHITE,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  notice: {
+    textAlign: 'center',
+    padding: 8,
+    color: '#999',
+    fontStyle: 'italic',
+    fontSize: 12,
+  },
 });
 
 export default DateCard;

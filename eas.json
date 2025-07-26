@@ -1,16 +1,36 @@
 {
   "cli": {
-    "version": ">= 3.0.0"
+    "version": ">= 3.0.0",
+    "appVersionSource": "remote"
   },
   "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_NO_CAPABILITY_SYNC": "1"
+      },
+      "autoIncrement": true
+    },
     "production": {
       "channel": "production",
+      "developmentClient": false,
+      "distribution": "store",
       "env": {
-        "EXPO_NO_CAPABILITY_SYNC": "1",
-        "SUPABASE_URL": "https://amtvilzctpeapjqtwnlk.supabase.co",
-        "SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFtdHZpbHpjdHBlYXBqcXR3bmxrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk0NDY3NDQsImV4cCI6MjA2NTAyMjc0NH0.jH2R6IM-gBMTyhr-o-hdUjZgpUOfmzhrE2S5kX3VPnQ"
+        "EXPO_NO_CAPABILITY_SYNC": "1"
+      },
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "admin@pivot.do",
+        "ascAppId": "6747322650",
+        "appleTeamId": "SUFCY3Z3B4"
       }
     }
   }
 }
+
 

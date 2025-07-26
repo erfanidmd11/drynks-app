@@ -1,16 +1,17 @@
-// SignupStepFive.tsx
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Alert } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
+import { View, Text, StyleSheet, Alert, TouchableOpacity } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
+const genderOptions = ['Male', 'Female', 'TS'];
+
 const SignupStepFive = () => {
   const navigation = useNavigation();
   const route = useRoute();
-  const { username } = route.params as { username: string };
+
+  const { screenname, first_name, phone } = route.params || {};
 
   const [gender, setGender] = useState('');
 
@@ -20,34 +21,69 @@ const SignupStepFive = () => {
       return;
     }
 
-    const { data: userData } = await supabase.auth.getUser();
-    if (userData?.user) {
-      await supabase.from('profiles').upsert({
-        id: userData.user.id,
-        gender,
-        current_step: 'ProfileSetupStepFive',
-      });
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError || !userData?.user?.id || !userData.user.email) {
+      Alert.alert('Error', 'User not authenticated.');
+      return;
     }
 
-    navigation.navigate('ProfileSetupStepSix', { username });
+    const { user } = userData;
+
+    const { error: upsertError } = await supabase.from('profiles').upsert({
+      id: user.id,
+      email: user.email,
+      screenname,
+      first_name,
+      phone,
+      gender,
+      current_step: 'ProfileSetupStepFive',
+    });
+
+    if (upsertError) {
+      console.error('[Supabase Upsert Error]', upsertError);
+      Alert.alert('Error', 'Could not save your selection.');
+      return;
+    }
+
+    navigation.navigate('ProfileSetupStepSix', {
+      screenname,
+      first_name,
+      phone,
+    });
   };
 
   return (
     <AnimatedScreenWrapper>
       <View style={styles.container}>
-        <Text style={styles.header}>Hey @{username}, how do you identify? 🌈</Text>
+        <Text style={styles.header}>
+          {screenname ? `Hey @${screenname}, how do you identify? 🙂` : 'How do you identify? 🙂'}
+        </Text>
 
-        <Picker
-          selectedValue={gender}
-          onValueChange={(item) => setGender(item)}
-          style={styles.picker}>
-          <Picker.Item label="Select Gender" value="" />
-          <Picker.Item label="Male" value="Male" />
-          <Picker.Item label="Female" value="Female" />
-          <Picker.Item label="TS" value="TS" />
-        </Picker>
+        <View style={styles.optionsWrapper}>
+          {genderOptions.map(option => (
+            <TouchableOpacity
+              key={option}
+              onPress={() => setGender(option)}
+              style={[
+                styles.optionButton,
+                gender === option && styles.optionButtonSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.optionText,
+                  gender === option && styles.optionTextSelected,
+                ]}
+              >
+                {option}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
-        <OnboardingNavButtons onNext={handleNext} />
+        <View style={{ marginTop: 40 }}>
+          <OnboardingNavButtons onNext={handleNext} disabled={!gender} />
+        </View>
       </View>
     </AnimatedScreenWrapper>
   );
@@ -63,12 +99,33 @@ const styles = StyleSheet.create({
   header: {
     fontSize: 22,
     fontWeight: 'bold',
-    marginBottom: 20,
+    marginBottom: 30,
     textAlign: 'center',
   },
-  picker: {
-    height: 50,
-    marginBottom: 20,
+  optionsWrapper: {
+    flexDirection: 'column',
+    gap: 15,
+  },
+  optionButton: {
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    backgroundColor: '#f5f5f5',
+    borderRadius: 10,
+    borderColor: '#ccc',
+    borderWidth: 1,
+  },
+  optionButtonSelected: {
+    backgroundColor: '#ff5a5f',
+    borderColor: '#ff5a5f',
+  },
+  optionText: {
+    fontSize: 18,
+    textAlign: 'center',
+    color: '#333',
+  },
+  optionTextSelected: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
 });
 

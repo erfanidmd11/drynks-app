@@ -1,23 +1,23 @@
-// src/screens/Auth/LoginScreen.tsx
+// LoginScreen.tsx – Final Production-Ready with Branding + Password View Fix
 
 import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
-  Keyboard,
-  KeyboardAvoidingView,
-  TouchableWithoutFeedback,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, Alert,
+  Keyboard, KeyboardAvoidingView, TouchableWithoutFeedback, Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
+import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
+import { Ionicons } from '@expo/vector-icons';
+
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#FFFFFF';
+const DRYNKS_WHITE = '#FFFFFF';
 
 const getNextIncompleteStep = (profile: any): string | null => {
   if (!profile?.birthdate) return 'ProfileSetupStepTwo';
-  if (!profile?.first_name || !profile?.username) return 'ProfileSetupStepThree';
+  if (!profile?.first_name || !profile?.screenname) return 'ProfileSetupStepThree';
   if (!profile?.phone) return 'ProfileSetupStepFour';
   if (!profile?.gender) return 'ProfileSetupStepFive';
   const prefs = profile?.preferences;
@@ -36,6 +36,7 @@ const LoginScreen = () => {
   const navigation = useNavigation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     console.log('[LoginScreen] Mounted');
@@ -59,6 +60,11 @@ const LoginScreen = () => {
         return;
       }
 
+      if (!authData?.user?.email_confirmed_at) {
+        Alert.alert('Email Not Verified', 'Please verify your email before continuing.');
+        return;
+      }
+
       const userId = authData?.user?.id;
       if (!userId) {
         Alert.alert('Login Error', 'User session invalid.');
@@ -73,30 +79,35 @@ const LoginScreen = () => {
 
       if (profileError || !profile) {
         console.warn('[LoginScreen] No profile found. Creating...');
-        const { error: createError } = await supabase
-          .from('profiles')
-          .upsert({ id: userId });
-
+        const { error: createError } = await supabase.from('profiles').upsert({ id: userId });
         if (createError) {
           Alert.alert('Login Error', 'Could not create profile.');
           return;
         }
-
         profile = { id: userId };
       }
 
-      const nextStep = getNextIncompleteStep(profile);
-      navigation.reset({
-        index: 0,
-        routes: [{ name: nextStep || 'App' }],
-      });
+      const routeData = {
+        screenname: profile.screenname,
+        first_name: profile.first_name,
+        phone: profile.phone,
+      };
+
+      if (profile.has_completed_profile) {
+        console.log('[Login] Profile complete. Routing to App');
+        navigation.reset({ index: 0, routes: [{ name: 'App' }] });
+      } else {
+        const nextStep = getNextIncompleteStep(profile);
+        console.log('[Login] Profile incomplete. Routing to:', nextStep);
+        navigation.reset({ index: 0, routes: [{ name: nextStep, params: routeData }] });
+      }
     } catch (err) {
       console.error('[Login Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong during login.');
     }
   };
 
-  const handleForgotPassword = async () => {
+  const handleForgotPassword = () => {
     Alert.alert(
       'Reset Password',
       'Please contact support to reset your password or use the Supabase reset email system.'
@@ -104,51 +115,63 @@ const LoginScreen = () => {
   };
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.container}>
-          <Text style={styles.title}>Your Plus-One for Yacht Parties, Concerts & the Unexpected.</Text>
+    <AnimatedScreenWrapper>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.container}>
+            <Text style={styles.title}>
+              Your Plus-One for Yacht Parties, Concerts & the Unexpected.
+            </Text>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor="#999"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            value={email}
-            onChangeText={setEmail}
-          />
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor="#999"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              value={email}
+              onChangeText={setEmail}
+            />
 
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor="#999"
-            secureTextEntry
-            value={password}
-            onChangeText={setPassword}
-          />
+            <View style={styles.passwordWrapper}>
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="Password"
+                placeholderTextColor="#999"
+                secureTextEntry={!showPassword}
+                value={password}
+                onChangeText={setPassword}
+              />
+              <TouchableOpacity style={styles.eyeIcon} onPress={() => setShowPassword(!showPassword)}>
+                <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color="#888" />
+              </TouchableOpacity>
+            </View>
 
-          <TouchableOpacity style={styles.button} onPress={handleLogin}>
-            <Text style={styles.buttonText}>Login</Text>
-          </TouchableOpacity>
+            <TouchableOpacity style={styles.button} onPress={handleLogin}>
+              <Text style={styles.buttonText}>Login</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity onPress={handleForgotPassword}>
-            <Text style={styles.linkText}>Forgot Password?</Text>
-          </TouchableOpacity>
+            <TouchableOpacity onPress={handleForgotPassword}>
+              <Text style={styles.linkText}>Forgot Password?</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne')}>
-            <Text style={styles.signupText}>Don't have an account? <Text style={styles.signupHighlight}>Sign up</Text></Text>
-          </TouchableOpacity>
-        </View>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
+            <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne')}>
+              <Text style={styles.signupText}>
+                Don't have an account?{' '}
+                <Text style={styles.signupHighlight}>Sign up</Text>
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
+    </AnimatedScreenWrapper>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
@@ -158,7 +181,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 20,
     textAlign: 'center',
-    color: '#333',
+    color: DRYNKS_BLUE,
     paddingHorizontal: 10,
   },
   input: {
@@ -169,32 +192,53 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     marginBottom: 15,
+    backgroundColor: DRYNKS_GRAY,
+  },
+  passwordWrapper: {
+    width: '100%',
+    position: 'relative',
+    marginBottom: 15,
+  },
+  passwordInput: {
+    width: '100%',
+    height: 50,
+    borderColor: '#ccc',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    backgroundColor: DRYNKS_GRAY,
+    paddingRight: 40,
+  },
+  eyeIcon: {
+    position: 'absolute',
+    right: 10,
+    top: 12,
   },
   button: {
     width: '100%',
     height: 50,
-    backgroundColor: '#ff5a5f',
+    backgroundColor: DRYNKS_RED,
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 10,
   },
   buttonText: {
-    color: '#fff',
+    color: DRYNKS_WHITE,
     fontWeight: 'bold',
     fontSize: 16,
   },
   linkText: {
-    color: '#007BFF',
+    color: DRYNKS_BLUE,
     marginBottom: 15,
   },
   signupText: {
-    color: '#333',
+    color: DRYNKS_BLUE,
     marginTop: 10,
     fontSize: 14,
   },
   signupHighlight: {
-    color: '#007AFF',
+    color: DRYNKS_RED,
     fontWeight: '600',
   },
 });

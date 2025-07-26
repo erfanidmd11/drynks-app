@@ -1,4 +1,3 @@
-// MessagesScreen.tsx – Production Ready
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -9,12 +8,17 @@ import {
   ActivityIndicator,
   Alert,
   RefreshControl,
+  TextInput,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import { Ionicons } from '@expo/vector-icons';
+import Animated, { FadeInUp } from 'react-native-reanimated';
+import { SwipeListView } from 'react-native-swipe-list-view';
+import AppShell from '@components/AppShell';
 
 const MessagesScreen = () => {
+  const [search, setSearch] = useState('');
   const [dateThreads, setDateThreads] = useState<any[]>([]);
   const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>({});
   const [loading, setLoading] = useState(true);
@@ -29,7 +33,7 @@ const MessagesScreen = () => {
 
       const { data, error } = await supabase
         .from('date_requests')
-        .select('*, chat_messages!date_id(id, created_at)')
+        .select('*, chat_messages!date_id(id, created_at, content)')
         .or(`creator.eq.${user.id},accepted_users.cs.{${user.id}}`);
 
       if (error || !data) throw error;
@@ -94,52 +98,84 @@ const MessagesScreen = () => {
     }
   };
 
+  const deleteDateThread = async (dateId: string) => {
+    try {
+      const { error } = await supabase.from('date_requests').delete().eq('id', dateId);
+      if (error) throw error;
+      setDateThreads(prev => prev.filter(d => d.id !== dateId));
+    } catch (err) {
+      console.error('[Delete Thread Error]', err);
+      Alert.alert('Error', 'Could not delete conversation.');
+    }
+  };
+
   useEffect(() => {
     fetchUserDates();
   }, [fetchUserDates]);
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#ff5a5f" />
-      </View>
-    );
-  }
-
-  if (dateThreads.length === 0) {
-    return (
-      <View style={styles.center}>
-        <Text>You have no date messages yet.</Text>
-      </View>
-    );
-  }
+  const filteredThreads = dateThreads.filter(d =>
+    d.title?.toLowerCase().includes(search.toLowerCase()) ||
+    d.location?.toLowerCase().includes(search.toLowerCase()) ||
+    d.chat_messages?.at(-1)?.content?.toLowerCase().includes(search.toLowerCase())
+  );
 
   return (
-    <FlatList
-      data={dateThreads}
-      refreshControl={<RefreshControl refreshing={loading} onRefresh={fetchUserDates} />}
-      keyExtractor={(item) => item.id.toString()}
-      renderItem={({ item }) => {
-        const unread = unreadCounts[item.id] || 0;
+    <AppShell currentTab="Vibe">
+      {loading ? (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color="#ff5a5f" />
+        </View>
+      ) : dateThreads.length === 0 ? (
+        <View style={styles.center}>
+          <Text>You have no date messages yet.</Text>
+        </View>
+      ) : (
+        <>
+          <TextInput
+            style={{ backgroundColor: '#f0f0f0', padding: 10, margin: 12, borderRadius: 8 }}
+            placeholder="Search your conversations..."
+            value={search}
+            onChangeText={setSearch}
+          />
+          <SwipeListView
+            data={filteredThreads}
+            refreshControl={<RefreshControl refreshing={loading} onRefresh={fetchUserDates} />}
+            keyExtractor={(item) => item.id.toString()}
+            renderItem={({ item, index }) => {
+              const unread = unreadCounts[item.id] || 0;
+              const preview = item.chat_messages?.at(-1)?.content || '';
 
-        return (
-          <TouchableOpacity style={styles.item} onPress={() => openChatIfVerified(item.id)}>
-            <Ionicons name="wine" size={24} color="#333" style={styles.icon} />
-            <View style={styles.info}>
-              <Text style={styles.title}>{item.title || 'Untitled Date'}</Text>
-              <Text style={styles.subtitle} numberOfLines={1}>{item.location || ''}</Text>
-            </View>
-            {unread > 0 ? (
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>{unread}</Text>
+              return (
+                <Animated.View entering={FadeInUp.delay(index * 50)}>
+                  <TouchableOpacity style={styles.item} onPress={() => openChatIfVerified(item.id)}>
+                    <Ionicons name="wine" size={24} color="#333" style={styles.icon} />
+                    <View style={styles.info}>
+                      <Text style={styles.title}>{item.title || 'Untitled Date'}</Text>
+                      <Text style={styles.subtitle} numberOfLines={1}>{preview || item.location || ''}</Text>
+                    </View>
+                    {unread > 0 ? (
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText}>{unread}</Text>
+                      </View>
+                    ) : (
+                      <Ionicons name="chevron-forward" size={20} color="#999" />
+                    )}
+                  </TouchableOpacity>
+                </Animated.View>
+              );
+            }}
+            renderHiddenItem={({ item }) => (
+              <View style={styles.rowBack}>
+                <TouchableOpacity style={styles.deleteButton} onPress={() => deleteDateThread(item.id)}>
+                  <Text style={styles.deleteText}>Delete</Text>
+                </TouchableOpacity>
               </View>
-            ) : (
-              <Ionicons name="chevron-forward" size={20} color="#999" />
             )}
-          </TouchableOpacity>
-        );
-      }}
-    />
+            rightOpenValue={-75}
+          />
+        </>
+      )}
+    </AppShell>
   );
 };
 
@@ -155,6 +191,32 @@ const styles = StyleSheet.create({
     padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
+    backgroundColor: '#fff',
+    marginHorizontal: 10,
+    marginVertical: 6,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  rowBack: {
+    alignItems: 'center',
+    backgroundColor: '#f00',
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingRight: 20,
+    borderRadius: 12,
+    marginHorizontal: 10,
+    marginVertical: 6,
+  },
+  deleteButton: {
+    padding: 10,
+  },
+  deleteText: {
+    color: 'white',
+    fontWeight: 'bold',
   },
   icon: {
     marginRight: 12,
@@ -165,6 +227,7 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 16,
     fontWeight: '600',
+    color: '#333',
   },
   subtitle: {
     fontSize: 14,

@@ -1,13 +1,32 @@
-import React, { useState } from 'react';
+// Enhanced VerifyBanner.tsx with Branding and Logic Improvements
+
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { supabase } from '@config/supabase';
+
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#E1EBF2';
+const DRYNKS_WHITE = '#FFFFFF';
 
 const VerifyBanner = ({ profile }: { profile: any }) => {
   const [emailLoading, setEmailLoading] = useState(false);
   const [phoneLoading, setPhoneLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [visible, setVisible] = useState(true);
+  const [verifiedStatus, setVerifiedStatus] = useState({ email: false, phone: false });
+
+  useEffect(() => {
+    const fetchStatus = async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      setVerifiedStatus({
+        email: userData?.user?.email_confirmed_at !== null,
+        phone: userData?.user?.phone_confirmed_at !== null,
+      });
+    };
+    fetchStatus();
+  }, []);
 
   const handleEmailVerify = async () => {
     setEmailLoading(true);
@@ -35,7 +54,7 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
     }
   };
 
-  if (!visible) return null;
+  if (!visible || (verifiedStatus.email && verifiedStatus.phone)) return null;
 
   return (
     <Animated.View entering={FadeIn} style={styles.banner}>
@@ -46,24 +65,24 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
         </TouchableOpacity>
       </View>
 
-      {!profile.email_verified && (
+      {!verifiedStatus.email && (
         <View style={styles.row}>
           <Text style={styles.label}>{profile.email}</Text>
           {emailLoading ? (
-            <ActivityIndicator />
+            <ActivityIndicator color={DRYNKS_BLUE} />
           ) : (
             <TouchableOpacity onPress={handleEmailVerify}>
-              <Text style={styles.link}>Send Email</Text>
+              <Text style={styles.link}>Resend Email</Text>
             </TouchableOpacity>
           )}
         </View>
       )}
 
-      {!profile.phone_verified && (
+      {!verifiedStatus.phone && (
         <View style={styles.row}>
           <Text style={styles.label}>{profile.phone}</Text>
           {phoneLoading ? (
-            <ActivityIndicator />
+            <ActivityIndicator color={DRYNKS_BLUE} />
           ) : (
             <TouchableOpacity onPress={handlePhoneVerify}>
               <Text style={styles.link}>Send Code</Text>
@@ -92,9 +111,10 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 16,
     fontWeight: 'bold',
+    color: DRYNKS_BLUE,
   },
   dismiss: {
-    color: '#007AFF',
+    color: DRYNKS_RED,
     fontWeight: '600',
   },
   row: {
@@ -104,15 +124,15 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   label: {
-    color: '#555',
+    color: DRYNKS_BLUE,
   },
   link: {
-    color: '#007AFF',
+    color: DRYNKS_RED,
     fontWeight: 'bold',
   },
   message: {
     marginTop: 10,
-    color: 'green',
+    color: DRYNKS_BLUE,
     fontWeight: '500',
   },
 });

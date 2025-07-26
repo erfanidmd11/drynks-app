@@ -27,8 +27,6 @@ const SignupStepTwo = () => {
       formatted = digitsOnly;
     } else if (digitsOnly.length <= 4) {
       formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2)}`;
-    } else if (digitsOnly.length <= 8) {
-      formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2, 4)}/${digitsOnly.slice(4)}`;
     } else {
       formatted = `${digitsOnly.slice(0, 2)}/${digitsOnly.slice(2, 4)}/${digitsOnly.slice(4, 8)}`;
     }
@@ -53,15 +51,17 @@ const SignupStepTwo = () => {
 
     try {
       const { data: userData, error: userError } = await supabase.auth.getUser();
-      if (userError || !userData?.user?.email) {
+      if (userError || !userData?.user?.email || !userData?.user?.id) {
         Alert.alert('Error', 'User not authenticated.');
         return;
       }
 
       const email = userData.user.email;
+      const userId = userData.user.id;
+      const formattedBirthdate = birthdate.toISOString().split('T')[0];
 
       if (finalAge < 18) {
-        await supabase.from('waitlist_underage').insert({ email, birthdate });
+        await supabase.from('waitlist_underage').insert({ email, birthdate: formattedBirthdate });
         Alert.alert(
           'Almost There 🥲',
           'DrYnks is 18+ only. But hey, we’ll save you a spot! We’ll ping you with a birthday cheers and a sweet invite when the time is right. 🎉'
@@ -69,11 +69,31 @@ const SignupStepTwo = () => {
         return;
       }
 
-      await supabase.from('profiles').upsert({
-        id: userData.user.id,
-        birthdate,
+      const { data: profileData, error: profileError } = await supabase
+        .from('profiles')
+        .select('screenname, first_name, phone')
+        .eq('id', userId)
+        .maybeSingle();
+
+      const screenname = profileData?.screenname ?? '';
+      const first_name = profileData?.first_name ?? '';
+      const phone = profileData?.phone ?? '';
+
+      const { error: upsertError } = await supabase.from('profiles').upsert({
+        id: userId,
+        email,
+        screenname,
+        first_name,
+        phone,
+        birthdate: formattedBirthdate,
         current_step: 'ProfileSetupStepTwo',
-      });
+      }, { onConflict: 'id' });
+
+      if (upsertError) {
+        console.error('[Supabase Upsert Error]', upsertError);
+        Alert.alert('Database Error', 'Could not save your birthdate.');
+        return;
+      }
 
       navigation.navigate('ProfileSetupStepThree');
     } catch (err) {

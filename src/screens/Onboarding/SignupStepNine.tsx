@@ -1,8 +1,20 @@
-// SignupStepNine.tsx
+// SignupStepNine.tsx – Final Production Ready with City Picker Geocoding
+
 import React, { useEffect, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  StyleSheet,
+  Alert,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableWithoutFeedback,
+  Keyboard,
+  TouchableOpacity,
+} from 'react-native';
 import * as Location from 'expo-location';
-import { Picker } from '@react-native-picker/picker';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
@@ -17,10 +29,9 @@ const popularCities = [
 const SignupStepNine = () => {
   const navigation = useNavigation();
   const route = useRoute();
-  const { username } = route.params as { username: string };
-
+  const { screenname, first_name, phone } = route.params || {};
   const [location, setLocation] = useState('');
-  const [selectedCity, setSelectedCity] = useState('');
+  const [coords, setCoords] = useState({ latitude: null, longitude: null });
 
   useEffect(() => {
     (async () => {
@@ -33,63 +44,145 @@ const SignupStepNine = () => {
         longitude: loc.coords.longitude,
       });
       if (geo.length > 0) setLocation(geo[0].city || '');
+      setCoords({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
     })();
   }, []);
 
+  const handleUseCurrentLocation = async () => {
+    try {
+      const loc = await Location.getCurrentPositionAsync({});
+      const geo = await Location.reverseGeocodeAsync({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
+      if (geo.length > 0) {
+        setLocation(geo[0].city || '');
+        setCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+      }
+    } catch (err) {
+      Alert.alert('Location Error', 'Could not fetch current location.');
+    }
+  };
+
+  const handleCityPress = async (city) => {
+    try {
+      setLocation(city);
+      const results = await Location.geocodeAsync(city);
+      if (results.length > 0) {
+        setCoords({
+          latitude: results[0].latitude,
+          longitude: results[0].longitude,
+        });
+      }
+    } catch (error) {
+      console.error('Geocoding error:', error);
+    }
+  };
+
   const handleNext = async () => {
-    const finalLocation = selectedCity || location;
-    if (!finalLocation) {
+    if (!screenname || !first_name || !phone) {
+      Alert.alert('Missing Info', 'Your signup session is incomplete. Please restart the signup process.');
+      navigation.navigate('ProfileSetupStepOne');
+      return;
+    }
+
+    if (!location) {
       Alert.alert('Where You At?', 'Please select or enter your city.');
       return;
     }
 
-    const { data: userData } = await supabase.auth.getUser();
-    if (userData?.user) {
-      await supabase.from('profiles').upsert({
-        id: userData.user.id,
-        location: finalLocation,
-        current_step: 'ProfileSetupStepNine',
-      });
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError || !userData?.user?.id || !userData.user.email) {
+      Alert.alert('Error', 'User authentication failed.');
+      return;
     }
 
-    navigation.navigate('ProfileSetupStepTen', { username });
+    const { user } = userData;
+
+    const { error: upsertError } = await supabase.from('profiles').upsert({
+      id: user.id,
+      email: user.email,
+      screenname,
+      first_name,
+      phone,
+      location,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      current_step: 'ProfileSetupStepNine',
+    });
+
+    if (upsertError) {
+      console.error('[Supabase Upsert Error]', upsertError);
+      Alert.alert('Error', 'Could not save your location.');
+      return;
+    }
+
+    navigation.navigate('ProfileSetupStepTen', {
+      screenname,
+      first_name,
+      phone,
+    });
   };
 
   return (
     <AnimatedScreenWrapper>
-      <View style={styles.container}>
-        <Text style={styles.header}>Where You Chillin’, @{username}? 📍</Text>
-        <Text style={styles.subtext}>We’ve auto-filled your location, but feel free to change it or pick from our party hot list.</Text>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
+            <Text style={styles.header}>
+              {screenname ? `Where You Chillin’, @${screenname}? 📍` : 'Where You Chillin’? 📍'}
+            </Text>
+            <Text style={styles.subtext}>
+              We’ve auto-filled your location, but feel free to change it or pick from our party hot list.
+            </Text>
 
-        <TextInput
-          style={styles.input}
-          placeholder="Enter your city"
-          value={location}
-          onChangeText={setLocation}
-          placeholderTextColor="#999"
-        />
+            <TextInput
+              style={styles.input}
+              placeholder="Enter your city"
+              value={location}
+              onChangeText={setLocation}
+              placeholderTextColor="#999"
+            />
 
-        <Picker
-          selectedValue={selectedCity}
-          onValueChange={(item) => setSelectedCity(item)}
-          style={styles.picker}>
-          <Picker.Item label="Or pick a popular city" value="" />
-          {popularCities.map(city => (
-            <Picker.Item key={city} label={city} value={city} />
-          ))}
-        </Picker>
+            <TouchableOpacity onPress={handleUseCurrentLocation} style={{ marginVertical: 10 }}>
+              <Text style={{ color: '#232F39', fontWeight: '600' }}>📍 Use My Current Location</Text>
+            </TouchableOpacity>
 
-        <OnboardingNavButtons onNext={handleNext} />
-      </View>
+            <View style={styles.cityGrid}>
+              {popularCities.map(city => (
+                <TouchableOpacity
+                  key={city}
+                  style={[styles.cityButton, location === city && styles.cityButtonSelected]}
+                  onPress={() => handleCityPress(city)}
+                >
+                  <Text style={[styles.cityButtonText, location === city && styles.cityButtonTextSelected]}>
+                    {city}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <View style={{ marginTop: 30 }}>
+              <OnboardingNavButtons onNext={handleNext} disabled={!location} />
+            </View>
+          </ScrollView>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
     </AnimatedScreenWrapper>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
+  scrollContainer: {
+    flexGrow: 1,
     paddingHorizontal: 20,
+    justifyContent: 'center',
     backgroundColor: '#fff',
   },
   header: {
@@ -113,9 +206,32 @@ const styles = StyleSheet.create({
     marginBottom: 15,
     fontSize: 16,
   },
-  picker: {
-    height: 50,
-    marginBottom: 20,
+  cityGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  cityButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    backgroundColor: '#f2f2f2',
+    borderRadius: 20,
+    margin: 5,
+    borderColor: '#ccc',
+    borderWidth: 1,
+  },
+  cityButtonSelected: {
+    backgroundColor: '#ff5a5f',
+    borderColor: '#ff5a5f',
+  },
+  cityButtonText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  cityButtonTextSelected: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
 });
 

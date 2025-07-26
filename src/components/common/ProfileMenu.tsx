@@ -1,12 +1,49 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import {
+  View, TouchableOpacity, Text, StyleSheet, Modal, Alert, Image, Animated,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#E1EBF2';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const ProfileMenu = () => {
   const navigation = useNavigation();
   const [visible, setVisible] = useState(false);
+  const [profileUrl, setProfileUrl] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
+  const fadeAnim = useState(new Animated.Value(0))[0];
+
+  useEffect(() => {
+    (async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData?.user?.id;
+      if (!userId) return;
+      setCurrentUserId(userId);
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('profile_photo')
+        .eq('id', userId)
+        .single();
+
+      if (profile?.profile_photo) {
+        if (profile.profile_photo.startsWith('http')) {
+          setProfileUrl(profile.profile_photo);
+        } else {
+          const { data: publicUrl } = supabase
+            .storage
+            .from('profile-photos')
+            .getPublicUrl(profile.profile_photo);
+          setProfileUrl(publicUrl?.publicUrl || '');
+        }
+      }
+    })();
+  }, []);
 
   const handleLogout = async () => {
     try {
@@ -19,23 +56,43 @@ const ProfileMenu = () => {
     }
   };
 
+  const showMenu = () => {
+    setVisible(true);
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 250,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const hideMenu = () => {
+    Animated.timing(fadeAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start(() => setVisible(false));
+  };
+
   return (
-    <View style={{ marginRight: 16 }}>
-      <TouchableOpacity onPress={() => setVisible(true)} hitSlop={10}>
+    <View style={{ marginLeft: 12 }}>
+      <TouchableOpacity onPress={showMenu} hitSlop={10}>
         <Image
-          source={{ uri: 'https://via.placeholder.com/40' }}
-          style={{ width: 32, height: 32, borderRadius: 16 }}
+          source={{ uri: profileUrl || 'https://cdn-icons-png.flaticon.com/512/847/847969.png' }}
+          style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: DRYNKS_GRAY }}
         />
       </TouchableOpacity>
-      <Modal visible={visible} transparent animationType="fade">
-        <TouchableOpacity style={styles.overlay} onPress={() => setVisible(false)}>
-          <View style={styles.menu}>
+
+      <Modal visible={visible} transparent animationType="none">
+        <TouchableOpacity style={styles.overlay} onPress={hideMenu} activeOpacity={1}>
+          <Animated.View style={[styles.menu, { opacity: fadeAnim }]}>
             <Text style={styles.title}>Your Profile</Text>
-            <TouchableOpacity onPress={() => {}}>
+            <TouchableOpacity
+              onPress={() => {
+                hideMenu();
+                navigation.navigate('Profile', { userId: currentUserId });
+              }}
+            >
               <Text style={styles.item}>My Profile</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => {}}>
-              <Text style={styles.item}>Edit Profile</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => {}}>
               <Text style={styles.item}>Settings</Text>
@@ -47,7 +104,7 @@ const ProfileMenu = () => {
             <TouchableOpacity onPress={() => {}}>
               <Text style={styles.hidden}>Delete Profile</Text>
             </TouchableOpacity>
-          </View>
+          </Animated.View>
         </TouchableOpacity>
       </Modal>
     </View>
@@ -58,35 +115,42 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     justifyContent: 'flex-start',
-    alignItems: 'flex-end',
-    paddingTop: 50,
-    paddingRight: 10,
+    alignItems: 'flex-start',
+    paddingTop: 60,
+    paddingLeft: 20,
     backgroundColor: 'rgba(0,0,0,0.1)',
   },
   menu: {
     width: 200,
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    padding: 10,
-    elevation: 5,
+    backgroundColor: DRYNKS_WHITE,
+    borderRadius: 12,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 6,
   },
   title: {
-    fontWeight: 'bold',
-    marginBottom: 8,
+    fontWeight: '700',
+    fontSize: 16,
+    color: DRYNKS_BLUE,
+    marginBottom: 10,
   },
   item: {
-    paddingVertical: 8,
-    fontSize: 16,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: DRYNKS_BLUE,
   },
   divider: {
     height: 1,
-    backgroundColor: '#eee',
-    marginVertical: 8,
+    backgroundColor: DRYNKS_GRAY,
+    marginVertical: 10,
   },
   hidden: {
-    color: '#f00',
+    color: DRYNKS_RED,
     fontSize: 14,
-    opacity: 0.6,
+    opacity: 0.7,
   },
 });
 

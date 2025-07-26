@@ -1,5 +1,5 @@
 import React, { ReactNode } from 'react';
-import { View, StyleSheet, Image } from 'react-native';
+import { View, StyleSheet, Image, Text } from 'react-native';
 import Animated, {
   FadeInRight,
   FadeOutLeft,
@@ -7,9 +7,17 @@ import Animated, {
 
 interface Props {
   children: ReactNode;
+  showLogo?: boolean;
+  userId?: string | null;
+  datesCount?: number;
 }
 
-const AnimatedScreenWrapper = ({ children }: Props) => {
+const AnimatedScreenWrapper = ({
+  children,
+  showLogo = true,
+  userId,
+  datesCount,
+}: Props) => {
   const EnterAnim = FadeInRight.duration(500);
   const ExitAnim = FadeOutLeft.duration(300);
 
@@ -19,16 +27,23 @@ const AnimatedScreenWrapper = ({ children }: Props) => {
       exiting={ExitAnim}
       style={styles.container}
     >
-      <View style={styles.logoContainer}>
-        <Image
-          source={require('../../../assets/images/DrYnks_Y_logo.png')}
-          style={styles.logo}
-          resizeMode="contain"
-        />
+      {showLogo && (
+        <View style={styles.logoContainer}>
+          <Image
+            source={require('../../../assets/images/DrYnks_Y_logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+        </View>
+      )}
+
+      {/* Debug info always shown */}
+      <View style={styles.debugInfo}>
+        <Text style={styles.debugText}>User ID: {userId || 'Not signed in'}</Text>
+        <Text style={styles.debugText}>Dates Loaded: {datesCount ?? 'N/A'}</Text>
       </View>
-      <View style={styles.content}>
-        {children}
-      </View>
+
+      <View style={styles.content}>{children}</View>
     </Animated.View>
   );
 };
@@ -40,12 +55,20 @@ const styles = StyleSheet.create({
   },
   logoContainer: {
     alignItems: 'center',
-    marginTop: 40,
-    marginBottom: 20,
+    marginTop: 60,
+    marginBottom: 30,
   },
   logo: {
-    width: 60,
-    height: 60,
+    width: 120,
+    height: 120,
+  },
+  debugInfo: {
+    marginHorizontal: 20,
+    marginBottom: 10,
+  },
+  debugText: {
+    fontSize: 12,
+    color: 'gray',
   },
   content: {
     flex: 1,

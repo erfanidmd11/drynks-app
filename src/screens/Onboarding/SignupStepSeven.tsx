@@ -1,4 +1,3 @@
-// SignupStepSeven.tsx
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -9,7 +8,8 @@ import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 const SignupStepSeven = () => {
   const navigation = useNavigation();
   const route = useRoute();
-  const { username } = route.params as { username: string };
+
+  const { screenname, first_name, phone } = route.params || {};
 
   const [accepted, setAccepted] = useState(false);
 
@@ -19,22 +19,43 @@ const SignupStepSeven = () => {
       return;
     }
 
-    const { data: userData } = await supabase.auth.getUser();
-    if (userData?.user) {
-      await supabase.from('profiles').upsert({
-        id: userData.user.id,
-        agreed_to_terms: true,
-        current_step: 'ProfileSetupStepSeven',
-      });
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError || !userData?.user?.id || !userData.user.email) {
+      Alert.alert('Error', 'User authentication failed.');
+      return;
     }
 
-    navigation.navigate('ProfileSetupStepEight', { username });
+    const { user } = userData;
+
+    const { error: upsertError } = await supabase.from('profiles').upsert({
+      id: user.id,
+      email: user.email,
+      screenname,
+      first_name,
+      phone,
+      agreed_to_terms: true,
+      current_step: 'ProfileSetupStepSeven',
+    });
+
+    if (upsertError) {
+      console.error('[Supabase Upsert Error]', upsertError);
+      Alert.alert('Error', 'Could not save your agreement.');
+      return;
+    }
+
+    navigation.navigate('ProfileSetupStepEight', {
+      screenname,
+      first_name,
+      phone,
+    });
   };
 
   return (
     <AnimatedScreenWrapper>
       <View style={styles.container}>
-        <Text style={styles.header}>The Fine Print, @{username} 📜</Text>
+        <Text style={styles.header}>
+          {screenname ? `The Fine Print, @${screenname} 📜` : 'The Fine Print 📜'}
+        </Text>
         <Text style={styles.subtext}>
           By using DrYnks, you agree to our Terms of Use and Privacy Policy. It's our way of keeping the vibe safe, respectful, and spam-free.
         </Text>
@@ -53,7 +74,7 @@ const SignupStepSeven = () => {
           <Text style={styles.acceptText}>I agree to the Terms of Use and Privacy Policy</Text>
         </TouchableOpacity>
 
-        <OnboardingNavButtons onNext={handleNext} />
+        <OnboardingNavButtons onNext={handleNext} disabled={!accepted} />
       </View>
     </AnimatedScreenWrapper>
   );

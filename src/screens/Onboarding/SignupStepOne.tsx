@@ -1,5 +1,3 @@
-// src/screens/Onboarding/SignupStepOne.tsx
-
 import React, { useState } from 'react';
 import {
   View,
@@ -13,6 +11,7 @@ import {
   Platform,
   TouchableWithoutFeedback,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -23,29 +22,32 @@ const SignupStepOne = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
-  const validatePassword = (password: string) => ({
+  const validatePassword = (password) => ({
     length: password.length >= 9,
     uppercase: /[A-Z]/.test(password),
     number: /[0-9]/.test(password),
     special: /[^A-Za-z0-9]/.test(password),
   });
 
-  const isEmailValid = (email: string) =>
-    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const isEmailValid = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 
   const handleNext = async () => {
     const checks = validatePassword(password);
     const validPassword = Object.values(checks).every(Boolean);
 
     if (!email || !password || !validPassword || !isEmailValid(email)) {
-      Alert.alert('Hold Up!', 'Make sure your email is valid and password meets all the requirements.');
+      Alert.alert(
+        'Hold Up!',
+        'Make sure your email is valid and password meets all the requirements.'
+      );
       return;
     }
 
     try {
       setLoading(true);
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -56,10 +58,22 @@ const SignupStepOne = () => {
 
       if (error) {
         Alert.alert('Signup Error', error.message);
-      } else {
-        await saveCredentials(email, password);
-        navigation.navigate('EnterOtpScreen', { email, password });
+        return;
       }
+
+      const user = data?.user;
+      if (user?.id) {
+        // ✅ Safe early upsert
+        await supabase.from('profiles').upsert({
+          id: user.id,
+          email: user.email,
+          current_step: 'ProfileSetupStepOne',
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      await saveCredentials(email, password);
+      navigation.navigate('EnterOtpScreen', { email, password });
     } catch (err) {
       console.error('[Signup Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong. Please try again.');
@@ -77,6 +91,12 @@ const SignupStepOne = () => {
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={styles.container}>
+          <Image
+            source={require('@assets/images/DrYnks_Y_logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+
           <Text style={styles.tagline}>
             Your Plus-One for Yacht Parties, Concerts & the Unexpected.
           </Text>
@@ -93,14 +113,21 @@ const SignupStepOne = () => {
             placeholderTextColor="#999"
           />
 
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            placeholderTextColor="#999"
-          />
+          <View style={styles.passwordContainer}>
+            <TextInput
+              style={[styles.input, { flex: 1, borderWidth: 0, marginBottom: 0 }]}
+              placeholder="Password"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
+              placeholderTextColor="#999"
+            />
+            <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+              <Text style={styles.toggle}>
+                {showPassword ? 'Hide' : 'Show'}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           <View style={styles.checklist}>
             <Text style={{ color: passwordChecks.length ? 'green' : 'red' }}>
@@ -148,6 +175,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     backgroundColor: '#fff',
   },
+  logo: {
+    width: 80,
+    height: 80,
+    alignSelf: 'center',
+    marginBottom: 20,
+  },
   tagline: {
     textAlign: 'center',
     fontSize: 14,
@@ -169,6 +202,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     marginBottom: 15,
     fontSize: 16,
+  },
+  passwordContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderColor: '#ccc',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    marginBottom: 15,
+    height: 50,
+  },
+  toggle: {
+    color: '#007AFF',
+    fontWeight: '600',
+    marginLeft: 10,
   },
   checklist: {
     marginBottom: 20,
