@@ -1,4 +1,4 @@
-// Final DateCard.tsx with Supabase RPC notification integration using fetch
+// Final DateCard.tsx with accurate gallery logic for creator and accepted users
 
 import React, { useState, useRef } from 'react';
 import {
@@ -27,18 +27,34 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
   const [dismissed, setDismissed] = useState(false);
   const flatListRef = useRef();
 
-  const eventDate = new Date(date?.event_date);
-  const isPast = eventDate < new Date();
+  const eventDate = date?.event_date ? new Date(date.event_date) : null;
+  const isPast = eventDate ? eventDate < new Date() : false;
 
   const accepted = date.accepted_profiles || [];
   const available = date.preferred_gender_counts || {};
   const remaining = date.remaining_gender_counts || {};
 
-  const gallery = [
-    ...(date.profile_photo ? [{ type: 'event', photo: date.profile_photo }] : []),
-    date.creator_profile ? { type: 'creator', profile: date.creator_profile } : null,
-    ...accepted.filter(p => p).map(p => ({ type: 'accepted', profile: p })),
-  ].filter(Boolean);
+  const hasAcceptedUsers = accepted.length > 0;
+  const gallery = [];
+
+  // First: Date photo or first gallery photo
+  if (date.profile_photo) {
+    gallery.push({ type: 'event', photo: date.profile_photo });
+  } else if (date.creator_profile?.gallery_photos?.length) {
+    gallery.push({ type: 'creator_photo', photo: date.creator_profile.gallery_photos[0], profile: date.creator_profile });
+  }
+
+  // Second: Creator's profile photo
+  if (date.creator_profile?.avatar_url) {
+    gallery.push({ type: 'creator', profile: date.creator_profile });
+  }
+
+  // Then: accepted user profile photos
+  if (hasAcceptedUsers) {
+    gallery.push(
+      ...accepted.filter(p => p && p.avatar_url).map(p => ({ type: 'accepted', profile: p }))
+    );
+  }
 
   const handleScroll = e => {
     const index = Math.round(e.nativeEvent.contentOffset.x / width);
@@ -52,7 +68,6 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date_id: date.id, actor_id: userId, action })
       });
-
       if (!response.ok) throw new Error('Notification failed');
     } catch (error) {
       console.error('Notification error:', error);
@@ -72,14 +87,17 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
   };
 
   const renderItem = ({ item }) => {
-    if (item.type === 'event') {
+    const p = item.profile;
+    if (item.type === 'event' || item.type === 'creator_photo') {
       return (
         <View style={styles.imageWrapper}>
           <Image source={{ uri: item.photo }} style={styles.image} />
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.6)"]} style={styles.overlay} />
           <View style={styles.textOverlay}>
             <Text style={styles.title}>{date.title}</Text>
-            <Text style={styles.subtitle}>{date.location} • {eventDate.toDateString()}</Text>
+            <Text style={styles.subtitle}>
+              {date.location}{eventDate ? ` • ${eventDate.toDateString()}` : ''}
+            </Text>
             {date.distance_km && <Text style={styles.subtitle}>{date.distance_km.toFixed(1)} km away</Text>}
             <Text style={styles.meta}>Hosted by: {date.creator_profile?.screen_name}</Text>
             <Text style={styles.meta}>Orientation: {date.orientation_preference?.join(', ')}</Text>
@@ -92,10 +110,8 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
           </View>
         </View>
       );
-    } else {
-      const p = item.profile;
+    } else if (item.type === 'creator' || item.type === 'accepted') {
       if (!p || !p.avatar_url) return null;
-
       return (
         <TouchableOpacity style={styles.imageWrapper} onPress={() => navigation.navigate('Profile', { userId: p.id })}>
           <Image source={{ uri: p.avatar_url }} style={styles.image} />
@@ -109,6 +125,7 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
         </TouchableOpacity>
       );
     }
+    return null;
   };
 
   if (dismissed) return null;
@@ -117,6 +134,7 @@ const DateCard = ({ date, userId, isCreator, isAccepted, disabled, onTap, onAcce
     <View style={styles.card}>
       <FlatList
         ref={flatListRef}
+        getItemLayout={(_, index) => ({ length: width, offset: width * index, index })}
         horizontal
         pagingEnabled
         snapToAlignment="center"
@@ -167,9 +185,10 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   imageWrapper: {
-    width,
+    width: width,
     height: HEIGHT,
     position: 'relative',
+    flexShrink: 0,
   },
   image: {
     width: '100%',

@@ -120,7 +120,7 @@ const LoginScreen = () => {
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.container}>
             <Text style={styles.title}>
-              Your Plus-One for Yacht Parties, Concerts & the Unexpected.
+              Your Plus-One for Yacht Parties, Concerts & the Unexpected. test 
             </Text>
 
             <TextInput
