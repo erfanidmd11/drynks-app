@@ -1,0 +1,18 @@
+name: Unresponded Invite Reminder
+
+on:
+  schedule:
+    - cron: '30 * * * *' # every hour at minute 30
+  workflow_dispatch:
+
+jobs:
+  call_unresponded_invite_reminder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Make POST request to Supabase Function
+        run: |
+          curl -X POST https://amtvilzctpeapjqtwnlk.functions.supabase.co/send_unresponded_invite_reminders \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.CRON_REMINDER_KEY }}" \
+            -d '{"hours": 3}'
