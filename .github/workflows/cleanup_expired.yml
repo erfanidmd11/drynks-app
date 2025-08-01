@@ -1,0 +1,17 @@
+name: Daily Cleanup
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # every day at 8:00 AM UTC
+  workflow_dispatch:
+
+jobs:
+  cleanup_expired:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Call Supabase Cleanup Function
+        run: |
+          curl -X POST https://amtvilzctpeapjqtwnlk.functions.supabase.co/cleanup_expired_chats \
+            -H "Authorization: Bearer ${{ secrets.CRON_REMINDER_KEY }}" \
+            -H "Content-Type: application/json"
