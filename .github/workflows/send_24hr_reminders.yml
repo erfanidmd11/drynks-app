@@ -1,0 +1,18 @@
+name: 24hr Reminder Cron
+
+on:
+  schedule:
+    - cron: '0 * * * *' # every hour
+  workflow_dispatch:
+
+jobs:
+  call_supabase_function:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Make POST request to Supabase Function
+        run: |
+          curl -X POST https://amtvilzctpeapjqtwnlk.functions.supabase.co/send_24hr_event_reminders \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.CRON_REMINDER_KEY }}" \
+            -d '{"hours": 24}'
