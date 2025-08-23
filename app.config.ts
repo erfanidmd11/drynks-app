@@ -15,7 +15,7 @@ export default {
     orientation: 'portrait',
     icon: './assets/images/app_icon.png',
 
-    // Make sure our guard runs first
+    // Ensure our guard runs first
     entryPoint: './index.js',
 
     // Deep linking scheme
@@ -37,6 +37,7 @@ export default {
       supportsTablet: true,
       bundleIdentifier: 'com.drynks.app',
       buildNumber: '2025081457', // bump for resubmission
+      usesAppleSignIn: true, // keep APPLE_ID_AUTH capability ON in Dev Portal
       infoPlist: {
         NSLocationWhenInUseUsageDescription:
           'This app uses your location to find nearby dates and events.',
@@ -61,10 +62,10 @@ export default {
         ITSAppUsesNonExemptEncryption: false,
       },
 
-      // Required for Branch/Firebase Dynamic Links
+      // Associated Domains entitlement
       associatedDomains: [...ASSOCIATED_DOMAINS],
-      // ⛔️ Do NOT declare manual entitlements here.
-      // Let EAS sync capabilities (push, Sign in with Apple, etc.) when needed.
+
+      // Let plugins/EAS manage entitlements (no manual "entitlements" block here)
     },
 
     android: {
@@ -87,7 +88,7 @@ export default {
       intentFilters: [
         {
           action: 'VIEW',
-          category: ['BROWSABLE', 'DEFAULT'],
+        category: ['BROWSABLE', 'DEFAULT'],
           data: [{ scheme: 'dr-ynks' }],
         },
         {
@@ -132,6 +133,8 @@ export default {
       'expo-secure-store',
       'expo-image-picker',
       'expo-location',
+      // Keep Sign in with Apple capability aligned with portal
+      'expo-apple-authentication',
       [
         'expo-build-properties',
         {
@@ -141,9 +144,7 @@ export default {
           },
         },
       ],
-      // When you actually use these features, add the plugins and rebuild:
-      // 'expo-apple-authentication',  // enables Sign in with Apple entitlements
-      // 'expo-notifications',         // enables push (aps-environment)
+      // Add 'expo-notifications' back when you're ready to ship push again.
     ],
   },
 } as const;
