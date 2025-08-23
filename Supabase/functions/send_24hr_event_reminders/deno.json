@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "read": ["env"]
+  },
+  "routes": [
+    {
+      "path": "send_24hr_event_reminders",
+      "methods": ["POST"],
+      "public": true
+    }
+  ]
+}

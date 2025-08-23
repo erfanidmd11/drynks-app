@@ -1,247 +1,314 @@
-// MyDatesScreen.tsx – Final Production Ready with Full Debug Logging
-import React, { useEffect, useState, useCallback } from 'react';
+// MyDatesScreen.tsx — Production Ready (Created & Accepted only, with MyDates actions)
+
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
-  FlatList,
   StyleSheet,
-  ActivityIndicator,
+  FlatList,
   RefreshControl,
-  Alert,
+  ActivityIndicator,
   TouchableOpacity,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
-import { Ionicons } from '@expo/vector-icons';
-import Animated, { FadeInUp } from 'react-native-reanimated';
 import AppShell from '@components/AppShell';
+import DateCard from '@components/cards/DateCard';
 
-const DRYNKS_RED = '#E34E5C';
-const DRYNKS_BLUE = '#232F39';
-const DRYNKS_GRAY = '#FFFFFF';
-const DRYNKS_WHITE = '#FFFFFF';
+type UUID = string;
 
-const FILTERS = ['Created', 'Accepted', 'Pending'];
+type ProfileLite = {
+  id: UUID;
+  screenname: string | null;
+  profile_photo: string | null;
+  birthdate?: string | null;
+  gender?: string | null;
+  location?: string | null;
+  preferences?: string[] | null;
+};
 
-const MyDatesScreen = () => {
-  const [dateRequests, setDateRequests] = useState([]);
-  const [userId, setUserId] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [activeFilters, setActiveFilters] = useState(FILTERS);
-  const [showPastDates, setShowPastDates] = useState(false);
-  const navigation = useNavigation();
+type DateRow = {
+  id: UUID;
+  title: string | null;
+  location: string | null; // may be city or WKT/hex
+  event_date: string | null;
+  event_type: string | null;
+  who_pays: string | null;
+  orientation_preference: string[] | null;
+  profile_photo: string | null;
+  photo_urls: string[] | null;
+  creator: UUID;
+  accepted_users: UUID[] | null;
+  spots: number | null;
+  preferred_gender_counts: Record<string, number> | null;
+  remaining_gender_counts: Record<string, number> | null;
+};
 
-  const fetchDateRequests = useCallback(async () => {
-    console.log('[MyDatesScreen] Fetching date requests...');
-    setLoading(true);
-    try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const user = sessionData?.session?.user;
-      if (!user) {
-        setLoading(false);
-        return;
-      }
-      setUserId(user.id);
-      console.log('[Logged in as]', user.id);
+const PAGE_SIZE = 20;
+const looksLikeWKTOrHex = (s?: string | null) =>
+  !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(s || ''));
 
-      const quotedId = `"${user.id}"`;
-      const { data, error } = await supabase
-        .from('date_requests')
-        .select('*')
-        .or(`creator.eq.${user.id},accepted_users.cs.{${quotedId}},declined_users.cs.{${quotedId}},pending_users.cs.{${quotedId}}`)
-        .order('event_date');
+const MyDatesScreen: React.FC = () => {
+  const navigation = useNavigation<any>();
 
-      if (error) {
-        console.error('[Fetch Date Requests Error]', error);
-        Alert.alert('Error', 'Failed to load dates.');
-      } else {
-        setDateRequests(data);
-        console.log('[Fetched dateRequests]', data);
-      }
-    } catch (err) {
-      console.error('[Fetch Error]', err);
-      Alert.alert('Error', 'Something went wrong.');
-    } finally {
-      setLoading(false);
-    }
+  const [userId, setUserId] = useState<UUID | null>(null);
+  const [tab, setTab] = useState<'created' | 'accepted'>('created');
+
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [created, setCreated] = useState<any[]>([]);
+  const [accepted, setAccepted] = useState<any[]>([]);
+  const [createdPage, setCreatedPage] = useState(1);
+  const [acceptedPage, setAcceptedPage] = useState(1);
+  const [createdHasMore, setCreatedHasMore] = useState(true);
+  const [acceptedHasMore, setAcceptedHasMore] = useState(true);
+
+  // Bootstrap session
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      const uid = data?.session?.user?.id as UUID | undefined;
+      if (uid) setUserId(uid);
+    })();
   }, []);
 
+  // Helper: fetch profiles for creator/accepted users
+  const fetchProfiles = useCallback(async (ids: UUID[]): Promise<Record<string, ProfileLite>> => {
+    if (!ids.length) return {};
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, screenname, profile_photo, birthdate, gender, location, preferences')
+      .in('id', ids);
+    if (error || !data) return {};
+    return data.reduce((acc: Record<string, ProfileLite>, p: any) => {
+      acc[p.id] = p;
+      return acc;
+    }, {});
+  }, []);
+
+  // Shape rows for DateCard
+  const hydrate = useCallback(
+    async (rows: DateRow[], viewer: UUID) => {
+      const creatorIds = Array.from(new Set(rows.map(r => r.creator)));
+      const acceptedIds = Array.from(
+        new Set(rows.flatMap(r => (Array.isArray(r.accepted_users) ? r.accepted_users : [])))
+      );
+      const map = await fetchProfiles(Array.from(new Set([...creatorIds, ...acceptedIds])));
+
+      return rows.map((r) => {
+        const creator_profile = map[r.creator] || null;
+        const accepted_profiles = (r.accepted_users || [])
+          .map((id) => map[id])
+          .filter(Boolean);
+
+        const cleanedLocation = looksLikeWKTOrHex(r.location)
+          ? (creator_profile?.location ?? null)
+          : r.location;
+
+        return {
+          id: r.id,
+          title: r.title,
+          event_date: r.event_date,
+          who_pays: r.who_pays,
+          event_type: r.event_type,
+          orientation_preference: r.orientation_preference || [],
+          distance_miles: null,
+          profile_photo: r.profile_photo,
+          photo_urls: r.photo_urls || [],
+          creator_id: r.creator,
+          creator_profile,
+          accepted_profiles,
+          spots: r.spots,
+          preferred_gender_counts: r.preferred_gender_counts || {},
+          remaining_gender_counts: r.remaining_gender_counts || {},
+          location: cleanedLocation,
+        };
+      });
+    },
+    [fetchProfiles]
+  );
+
+  const loadCreated = useCallback(async (page = 1, append = false) => {
+    if (!userId) return;
+    if (!append) setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('date_requests')
+        .select(
+          'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
+        )
+        .eq('creator', userId)
+        .order('event_date', { ascending: false })
+        .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+
+      if (error) return;
+      const hydrated = await hydrate((data || []) as DateRow[], userId);
+      setCreated(prev => (append ? [...prev, ...hydrated] : hydrated));
+      setCreatedHasMore((data || []).length === PAGE_SIZE);
+      setCreatedPage(page);
+    } finally {
+      if (!append) setLoading(false);
+    }
+  }, [userId, hydrate]);
+
+  const loadAccepted = useCallback(async (page = 1, append = false) => {
+    if (!userId) return;
+    if (!append) setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('date_requests')
+        .select(
+          'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
+        )
+        .contains('accepted_users', [userId])
+        .order('event_date', { ascending: false })
+        .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+
+      if (error) return;
+      const hydrated = await hydrate((data || []) as DateRow[], userId);
+      setAccepted(prev => (append ? [...prev, ...hydrated] : hydrated));
+      setAcceptedHasMore((data || []).length === PAGE_SIZE);
+      setAcceptedPage(page);
+    } finally {
+      if (!append) setLoading(false);
+    }
+  }, [userId, hydrate]);
+
+  // Initial load per tab
   useEffect(() => {
-    fetchDateRequests();
-  }, [fetchDateRequests]);
+    if (!userId) return;
+    if (tab === 'created') loadCreated(1, false);
+    else loadAccepted(1, false);
+  }, [userId, tab, loadCreated, loadAccepted]);
 
-  const toggleFilter = (filter) => {
-    setActiveFilters((prev) =>
-      prev.includes(filter) ? prev.filter(f => f !== filter) : [...prev, filter]
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    (tab === 'created' ? loadCreated(1, false) : loadAccepted(1, false)).finally(() =>
+      setRefreshing(false)
     );
-  };
+  }, [tab, loadCreated, loadAccepted]);
 
-  const filteredDates = dateRequests.filter(item => {
-    const isCreator = item.creator === userId;
-    const isAccepted = item.accepted_users?.includes(userId);
-    const isPending = item.pending_users?.includes(userId);
-    const isPast = new Date(item.event_date) < new Date();
-
-    const matchesFilter = (
-      (activeFilters.includes('Created') && isCreator) ||
-      (activeFilters.includes('Accepted') && isAccepted) ||
-      (activeFilters.includes('Pending') && isPending)
-    );
-
-    return showPastDates ? matchesFilter && isPast : matchesFilter && !isPast;
-  });
-
-  const renderItem = ({ item }) => {
-    const accepted = item.accepted_users?.includes(userId);
-    const declined = item.declined_users?.includes(userId);
-    const pending = item.pending_users?.includes(userId);
-
-    const eventDate = item.event_date
-      ? new Date(item.event_date).toLocaleDateString()
-      : 'No Date';
-
-    return (
-      <Animated.View entering={FadeInUp.duration(400)}>
-        <TouchableOpacity
-          style={styles.card}
-          onPress={() => navigation.navigate('DateDetails', { dateId: item.id })}
-        >
-          <View style={styles.infoWrap}>
-            <Text style={styles.title}>{item.title || 'Untitled'}</Text>
-            <Text style={styles.subtitle}>{`${item.location || ''} • ${eventDate}`}</Text>
-          </View>
-          {accepted ? (
-            <Ionicons name="checkmark-circle" size={26} color={DRYNKS_RED} />
-          ) : declined ? (
-            <Ionicons name="close-circle" size={26} color="gray" />
-          ) : pending ? (
-            <View style={styles.actions}>
-              <TouchableOpacity onPress={() => {}}>
-                <Ionicons name="close" size={26} color="gray" />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => {}}>
-                <Ionicons name="checkmark" size={26} color={DRYNKS_RED} />
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <Ionicons name="help-circle-outline" size={26} color="gray" />
-          )}
-        </TouchableOpacity>
-      </Animated.View>
-    );
-  };
+  const data = tab === 'created' ? created : accepted;
 
   return (
     <AppShell currentTab="My DrYnks">
-      <View style={{ padding: 12 }}>
-        <Text style={{ fontSize: 12, color: 'gray' }}>🛠 Debug: Logged in as: {userId || 'unknown'}</Text>
-        <Text style={{ fontSize: 12, color: 'gray' }}>🗓 Total dateRequests: {dateRequests.length}</Text>
-        <Text style={{ fontSize: 12, color: 'gray' }}>✅ Active Filters: {activeFilters.join(', ')}</Text>
-        <Text style={{ fontSize: 12, color: 'gray' }}>⏳ Show Past Dates: {showPastDates ? 'Yes' : 'No'}</Text>
+      {/* Tabs */}
+      <View style={styles.tabsRow}>
+        <Chip label="Created" active={tab === 'created'} onPress={() => setTab('created')} />
+        <Chip label="Accepted" active={tab === 'accepted'} onPress={() => setTab('accepted')} />
       </View>
 
-      <View style={styles.filterBar}>
-        {FILTERS.map(filter => (
-          <TouchableOpacity key={filter} onPress={() => toggleFilter(filter)} style={[styles.filterBtn, activeFilters.includes(filter) && styles.filterActive]}>
-            <Text style={styles.filterText}>{filter}</Text>
-          </TouchableOpacity>
-        ))}
-        <TouchableOpacity onPress={() => setShowPastDates(prev => !prev)} style={[styles.filterBtn, showPastDates && styles.filterActive]}>
-          <Text style={styles.filterText}>Past Dates</Text>
-        </TouchableOpacity>
-      </View>
-
-      {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={DRYNKS_RED} />
-        </View>
-      ) : filteredDates.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.emptyText}>No matching DrYnks yet. Adjust your filters or check back later.</Text>
+      {/* List */}
+      {loading && data.length === 0 ? (
+        <View style={{ padding: 24 }}>
+          <ActivityIndicator />
         </View>
       ) : (
         <FlatList
-          data={filteredDates}
-          refreshControl={<RefreshControl refreshing={loading} onRefresh={fetchDateRequests} />}
-          keyExtractor={(item) => item.id.toString()}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listWrap}
+          data={data}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+  <>
+    {/* keep your variant without breaking TS */}
+    <DateCard
+      date={item}
+      userId={userId!}
+      isCreator={tab === 'created'}
+      isAccepted={tab === 'accepted'}
+      {...({ variant: 'mydates' } as any)}
+      onCancel={async () => {
+        try {
+          if (tab === 'created') {
+            // Creator cancels: delete the whole date
+            const { error } = await supabase.from('date_requests').delete().eq('id', item.id);
+            if (error) throw error;
+            setCreated(prev => prev.filter(d => d.id !== item.id));
+          } else {
+            // Guest cancels: leave the date (remove your id from accepted_users)
+            const { data: row } = await supabase
+              .from('date_requests')
+              .select('accepted_users')
+              .eq('id', item.id)
+              .single();
+
+            const next = (row?.accepted_users || []).filter((id: string) => id !== userId);
+            const { error } = await supabase
+              .from('date_requests')
+              .update({ accepted_users: next })
+              .eq('id', item.id);
+            if (error) throw error;
+            setAccepted(prev => prev.filter(d => d.id !== item.id));
+          }
+        } catch (e) {
+          console.warn('[Cancel error]', e);
+        }
+      }}
+      onOpenChat={() => {
+        navigation.navigate('DateChat', { dateId: item.id });
+      }}
+    />
+  </>
+)}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          onEndReached={() => {
+            if (tab === 'created' && createdHasMore) loadCreated(createdPage + 1, true);
+            if (tab === 'accepted' && acceptedHasMore) loadAccepted(acceptedPage + 1, true);
+          }}
+          onEndReachedThreshold={0.5}
+          ListEmptyComponent={
+            <Text style={styles.empty}>
+              {tab === 'created'
+                ? "You haven't created any dates yet."
+                : "You haven't accepted any dates yet."}
+            </Text>
+          }
+          contentContainerStyle={{ paddingBottom: 24 }}
         />
       )}
     </AppShell>
   );
 };
 
+function Chip({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active?: boolean;
+  onPress?: () => void;
+}) {
+  return (
+    <TouchableOpacity onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
-  center: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 30,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: DRYNKS_BLUE,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  listWrap: {
-    paddingBottom: 80,
-    paddingTop: 10,
-  },
-  card: {
-    backgroundColor: DRYNKS_WHITE,
-    borderRadius: 16,
-    padding: 16,
-    marginHorizontal: 16,
-    marginBottom: 12,
+  tabsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  infoWrap: {
-    flex: 1,
-    marginRight: 12,
-  },
-  title: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: DRYNKS_BLUE,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#888',
-    marginTop: 4,
-  },
-  actions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  filterBar: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 12,
-    marginTop: 10,
+    gap: 10,
     paddingHorizontal: 16,
-    flexWrap: 'wrap',
+    paddingTop: 10,
+    paddingBottom: 6,
   },
-  filterBtn: {
-    paddingVertical: 6,
+  chip: {
     paddingHorizontal: 12,
-    borderRadius: 20,
-    backgroundColor: '#eee',
-    marginBottom: 8,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#E7EBF0',
   },
-  filterActive: {
-    backgroundColor: DRYNKS_RED,
+  chipActive: {
+    backgroundColor: '#232F39',
   },
-  filterText: {
-    color: DRYNKS_BLUE,
-    fontWeight: '600',
+  chipText: { color: '#23303A', fontWeight: '700' },
+  chipTextActive: { color: '#fff' },
+  empty: {
+    textAlign: 'center',
+    color: '#8C97A4',
+    padding: 24,
   },
 });
 

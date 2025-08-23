@@ -1,4 +1,5 @@
-// SignupStepNine.tsx – Final Production Ready with City Picker Geocoding
+// src/screens/Onboarding/SignupStepNine.tsx
+// Final Production Ready with City Picker Geocoding + DrYnks Branding
 
 import React, { useEffect, useState } from 'react';
 import {
@@ -20,6 +21,12 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const popularCities = [
   'Los Angeles', 'Miami', 'Boston', 'New York', 'Philadelphia',
   'San Jose', 'San Francisco', 'San Diego', 'Las Vegas',
@@ -27,27 +34,36 @@ const popularCities = [
 ];
 
 const SignupStepNine = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
-  const { screenname, first_name, phone } = route.params || {};
+  // Casts keep us moving while the global nav types are finalized
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { screenname, first_name, phone } = route.params ?? {};
+
   const [location, setLocation] = useState('');
-  const [coords, setCoords] = useState({ latitude: null, longitude: null });
+  const [coords, setCoords] = useState<{ latitude: number | null; longitude: number | null }>({
+    latitude: null,
+    longitude: null,
+  });
 
   useEffect(() => {
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
 
-      const loc = await Location.getCurrentPositionAsync({});
-      const geo = await Location.reverseGeocodeAsync({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      });
-      if (geo.length > 0) setLocation(geo[0].city || '');
-      setCoords({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      });
+        const loc = await Location.getCurrentPositionAsync({});
+        const geo = await Location.reverseGeocodeAsync({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        });
+        if (geo.length > 0) setLocation(geo[0].city || '');
+        setCoords({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        });
+      } catch {
+        // Silently ignore; user can still type/pick a city
+      }
     })();
   }, []);
 
@@ -67,7 +83,7 @@ const SignupStepNine = () => {
     }
   };
 
-  const handleCityPress = async (city) => {
+  const handleCityPress = async (city: string) => {
     try {
       setLocation(city);
       const results = await Location.geocodeAsync(city);
@@ -85,7 +101,7 @@ const SignupStepNine = () => {
   const handleNext = async () => {
     if (!screenname || !first_name || !phone) {
       Alert.alert('Missing Info', 'Your signup session is incomplete. Please restart the signup process.');
-      navigation.navigate('ProfileSetupStepOne');
+      navigation.navigate('ProfileSetupStepOne' as never);
       return;
     }
 
@@ -120,15 +136,15 @@ const SignupStepNine = () => {
       return;
     }
 
-    navigation.navigate('ProfileSetupStepTen', {
+    navigation.navigate('ProfileSetupStepTen' as never, {
       screenname,
       first_name,
       phone,
-    });
+    } as never);
   };
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -147,11 +163,11 @@ const SignupStepNine = () => {
               placeholder="Enter your city"
               value={location}
               onChangeText={setLocation}
-              placeholderTextColor="#999"
+              placeholderTextColor="#8A94A6"
             />
 
             <TouchableOpacity onPress={handleUseCurrentLocation} style={{ marginVertical: 10 }}>
-              <Text style={{ color: '#232F39', fontWeight: '600' }}>📍 Use My Current Location</Text>
+              <Text style={{ color: DRYNKS_BLUE, fontWeight: '600' }}>📍 Use My Current Location</Text>
             </TouchableOpacity>
 
             <View style={styles.cityGrid}>
@@ -169,7 +185,10 @@ const SignupStepNine = () => {
             </View>
 
             <View style={{ marginTop: 30 }}>
-              <OnboardingNavButtons onNext={handleNext} disabled={!location} />
+              <OnboardingNavButtons
+                onNext={handleNext}
+                {...({ disabled: !location } as any)} // cast extra prop for TS
+              />
             </View>
           </ScrollView>
         </TouchableWithoutFeedback>
@@ -183,28 +202,31 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingHorizontal: 20,
     justifyContent: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 10,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
   },
   subtext: {
     fontSize: 14,
-    color: '#555',
+    color: '#55606B',
     textAlign: 'center',
     marginBottom: 20,
   },
   input: {
     height: 50,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
+    borderRadius: 10,
+    paddingHorizontal: 12,
     marginBottom: 15,
     fontSize: 16,
+    backgroundColor: DRYNKS_GRAY,
+    color: '#1F2A33',
   },
   cityGrid: {
     flexDirection: 'row',
@@ -215,23 +237,23 @@ const styles = StyleSheet.create({
   cityButton: {
     paddingVertical: 10,
     paddingHorizontal: 15,
-    backgroundColor: '#f2f2f2',
+    backgroundColor: '#EEF2F6',
     borderRadius: 20,
     margin: 5,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
   },
   cityButtonSelected: {
-    backgroundColor: '#ff5a5f',
-    borderColor: '#ff5a5f',
+    backgroundColor: DRYNKS_RED,
+    borderColor: DRYNKS_RED,
   },
   cityButtonText: {
     fontSize: 14,
-    color: '#333',
+    color: '#23303A',
   },
   cityButtonTextSelected: {
-    color: '#fff',
-    fontWeight: 'bold',
+    color: DRYNKS_WHITE,
+    fontWeight: '700',
   },
 });
 

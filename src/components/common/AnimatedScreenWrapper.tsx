@@ -1,22 +1,24 @@
 import React, { ReactNode } from 'react';
-import { View, StyleSheet, Image, Text } from 'react-native';
-import Animated, {
-  FadeInRight,
-  FadeOutLeft,
-} from 'react-native-reanimated';
+import { View, StyleSheet, Image, TouchableOpacity, Text, ViewStyle } from 'react-native';
+import Animated, { FadeInRight, FadeOutLeft } from 'react-native-reanimated';
 
 interface Props {
   children: ReactNode;
   showLogo?: boolean;
-  userId?: string | null;
-  datesCount?: number;
+  /** Show a simple "← Back" control in the header area */
+  showBack?: boolean;
+  /** Called when the back control is pressed */
+  onBack?: () => void;
+  /** Optional style to override the outer container (e.g., backgroundColor) */
+  style?: ViewStyle | ViewStyle[];
 }
 
 const AnimatedScreenWrapper = ({
   children,
   showLogo = true,
-  userId,
-  datesCount,
+  showBack = false,
+  onBack,
+  style,
 }: Props) => {
   const EnterAnim = FadeInRight.duration(500);
   const ExitAnim = FadeOutLeft.duration(300);
@@ -25,23 +27,30 @@ const AnimatedScreenWrapper = ({
     <Animated.View
       entering={EnterAnim}
       exiting={ExitAnim}
-      style={styles.container}
+      style={[styles.container, style]}
     >
-      {showLogo && (
-        <View style={styles.logoContainer}>
-          <Image
-            source={require('../../../assets/images/DrYnks_Y_logo.png')}
-            style={styles.logo}
-            resizeMode="contain"
-          />
+      {(showLogo || showBack) && (
+        <View style={styles.header}>
+          {showBack && (
+            <TouchableOpacity
+              onPress={onBack}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+              style={styles.backBtn}
+            >
+              <Text style={styles.backText}>← Back</Text>
+            </TouchableOpacity>
+          )}
+
+          {showLogo && (
+            <Image
+              source={require('../../../assets/images/DrYnks_Y_logo.png')}
+              style={styles.logo}
+              resizeMode="contain"
+            />
+          )}
         </View>
       )}
-
-      {/* Debug info always shown */}
-      <View style={styles.debugInfo}>
-        <Text style={styles.debugText}>User ID: {userId || 'Not signed in'}</Text>
-        <Text style={styles.debugText}>Dates Loaded: {datesCount ?? 'N/A'}</Text>
-      </View>
 
       <View style={styles.content}>{children}</View>
     </Animated.View>
@@ -51,24 +60,29 @@ const AnimatedScreenWrapper = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#fff', // can be overridden via the 'style' prop
   },
-  logoContainer: {
+  header: {
     alignItems: 'center',
-    marginTop: 60,
-    marginBottom: 30,
+    justifyContent: 'center',
+    paddingTop: 60,
+    paddingBottom: 30,
+  },
+  backBtn: {
+    position: 'absolute',
+    left: 20,
+    top: 66, // visually aligned with header's paddingTop
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+  },
+  backText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#232F39', // DRYNKS_BLUE
   },
   logo: {
     width: 120,
     height: 120,
-  },
-  debugInfo: {
-    marginHorizontal: 20,
-    marginBottom: 10,
-  },
-  debugText: {
-    fontSize: 12,
-    color: 'gray',
   },
   content: {
     flex: 1,

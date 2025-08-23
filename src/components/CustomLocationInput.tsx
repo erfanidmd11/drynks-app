@@ -1,12 +1,24 @@
+// src/components/CustomLocationInput.tsx — Production-Ready
+
 import React, { useState, useEffect } from 'react';
 import {
-  View, TextInput, FlatList, TouchableOpacity, Text, StyleSheet
+  View,
+  TextInput,
+  FlatList,
+  TouchableOpacity,
+  Text,
+  StyleSheet,
+  Alert,
 } from 'react-native';
 import Constants from 'expo-constants';
 import * as Location from 'expo-location';
 
 const GOOGLE_API_KEY = Constants.expoConfig?.extra?.GOOGLE_API_KEY;
-console.log('🔑 Google API Key:', GOOGLE_API_KEY);
+
+type PlacePrediction = {
+  description: string;
+  place_id: string;
+};
 
 interface Props {
   value?: string;
@@ -19,41 +31,52 @@ interface Props {
 
 const CustomLocationInput: React.FC<Props> = ({ onLocationSelect, value }) => {
   const [query, setQuery] = useState(value || '');
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<PlacePrediction[]>([]);
 
   useEffect(() => {
-    console.log('📦 CustomLocationInput mounted');
+    // Mount log (optional)
+    // console.log('📦 CustomLocationInput mounted');
   }, []);
 
   const fetchPlaces = async (text: string) => {
     setQuery(text);
-    if (text.length < 2) return;
+    if (text.trim().length < 2 || !GOOGLE_API_KEY) {
+      setResults([]);
+      return;
+    }
 
     const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(
-      text
+      text.trim()
     )}&types=(cities)&key=${GOOGLE_API_KEY}`;
 
     try {
       const res = await fetch(url);
       const json = await res.json();
-      console.log('[GOOGLE PLACES]', json.status);
       if (json.status === 'OK') {
-        setResults(json.predictions || []);
+        setResults((json.predictions || []).map((p: any) => ({
+          description: p.description,
+          place_id: p.place_id,
+        })));
       } else {
-        console.warn('❌ Google API error:', json.status, json.error_message);
+        // console.warn('❌ Google API error:', json.status, json.error_message);
+        setResults([]);
       }
     } catch (e) {
-      console.warn('❌ Autocomplete fetch failed', e);
+      // console.warn('❌ Autocomplete fetch failed', e);
+      setResults([]);
     }
   };
 
-  const handleSelect = async (item: any) => {
+  const handleSelect = async (item: PlacePrediction) => {
+    if (!GOOGLE_API_KEY) return;
+
     const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${item.place_id}&key=${GOOGLE_API_KEY}`;
 
     try {
       const res = await fetch(detailUrl);
       const json = await res.json();
-      const location = json.result.geometry.location;
+      const location = json?.result?.geometry?.location;
+      if (!location) throw new Error('No geometry returned');
 
       setQuery(item.description);
       setResults([]);
@@ -63,20 +86,25 @@ const CustomLocationInput: React.FC<Props> = ({ onLocationSelect, value }) => {
         longitude: location.lng,
       });
     } catch (e) {
-      console.warn('❌ Place detail fetch failed', e);
+      // console.warn('❌ Place detail fetch failed', e);
+      Alert.alert('Location Error', 'Unable to fetch place details. Please try again.');
     }
   };
 
   const handleUseMyLocation = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        alert('Location permission denied');
+      if (status !== Location.PermissionStatus.GRANTED) {
+        Alert.alert('Permission Denied', 'Location permission denied');
         return;
       }
       const loc = await Location.getCurrentPositionAsync({});
       const geo = await Location.reverseGeocodeAsync(loc.coords);
-      const city = geo?.[0]?.city || geo?.[0]?.region || 'Current Location';
+      const city =
+        geo?.[0]?.city ||
+        geo?.[0]?.region ||
+        geo?.[0]?.subregion ||
+        'Current Location';
 
       setQuery(city);
       setResults([]);
@@ -86,7 +114,8 @@ const CustomLocationInput: React.FC<Props> = ({ onLocationSelect, value }) => {
         longitude: loc.coords.longitude,
       });
     } catch (e) {
-      console.warn('❌ Use My Location error', e);
+      // console.warn('❌ Use My Location error', e);
+      Alert.alert('Location Error', 'Unable to get your current location.');
     }
   };
 
@@ -99,9 +128,10 @@ const CustomLocationInput: React.FC<Props> = ({ onLocationSelect, value }) => {
         onChangeText={fetchPlaces}
         autoCorrect={false}
         onFocus={() => {
-          if (query.length >= 2) fetchPlaces(query);
+          if (query.trim().length >= 2) fetchPlaces(query);
         }}
       />
+
       {results.length > 0 && (
         <FlatList
           data={results}
@@ -112,8 +142,10 @@ const CustomLocationInput: React.FC<Props> = ({ onLocationSelect, value }) => {
             </TouchableOpacity>
           )}
           style={styles.dropdown}
+          keyboardShouldPersistTaps="handled"
         />
       )}
+
       <TouchableOpacity onPress={handleUseMyLocation} style={styles.locationBtn}>
         <Text style={styles.locationText}>📍 Use My Current Location</Text>
       </TouchableOpacity>

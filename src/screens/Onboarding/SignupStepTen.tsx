@@ -1,3 +1,4 @@
+// src/screens/Onboarding/SignupStepTen.tsx
 // SignupStepTen.tsx – Final Fix: Upload using FormData (no Blob, Buffer, or atob)
 import React, { useEffect, useState } from 'react';
 import {
@@ -6,7 +7,6 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import { supabase } from '@config/supabase';
@@ -23,12 +23,12 @@ const numColumns = 3;
 const itemSize = (screenWidth - 40 - (numColumns - 1) * 10) / numColumns;
 
 const SignupStepTen = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
-  const { screenname, first_name, phone } = route.params || {};
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { screenname, first_name, phone } = route.params ?? {};
 
-  const [profilePhoto, setProfilePhoto] = useState(null);
-  const [galleryPhotos, setGalleryPhotos] = useState([]);
+  const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
+  const [galleryPhotos, setGalleryPhotos] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fadeAnim = new Animated.Value(0);
 
@@ -45,7 +45,7 @@ const SignupStepTen = () => {
     }).start();
   }, []);
 
-  const enhanceImage = async (uri) => {
+  const enhanceImage = async (uri: string): Promise<string> => {
     try {
       const result = await ImageManipulator.manipulateAsync(
         uri,
@@ -59,20 +59,20 @@ const SignupStepTen = () => {
     }
   };
 
-  const uploadToSupabase = async (uri, userId, isProfile = false) => {
+  const uploadToSupabase = async (uri: string, userId: string, isProfile = false): Promise<string | null> => {
     const bucket = isProfile ? 'profile-photos' : 'user-photos';
     try {
-      const filename = `${userId}/${Date.now()}-${uri.split('/').pop()}`;
+      const filename = `${userId}/${Date.now()}-${(uri.split('/').pop() ?? 'image.jpg')}`;
       const fileType = 'image/jpeg';
 
       const formData = new FormData();
-      formData.append('file', {
+      formData.append('file' as any, {
         uri,
         name: filename,
         type: fileType,
-      });
+      } as any);
 
-      const { data, error } = await supabase.storage.from(bucket).upload(filename, formData, {
+      const { data, error } = await supabase.storage.from(bucket).upload(filename, formData as any, {
         contentType: fileType,
         upsert: true,
       });
@@ -82,9 +82,9 @@ const SignupStepTen = () => {
         return null;
       }
 
-      const { data: urlData, error: urlError } = supabase.storage.from(bucket).getPublicUrl(data.path);
-      if (urlError || !urlData?.publicUrl) {
-        console.error('[Public URL Error]', urlError);
+      const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(data.path);
+      if (!urlData?.publicUrl) {
+        console.error('[Public URL Error]');
         return null;
       }
 
@@ -106,7 +106,7 @@ const SignupStepTen = () => {
         if (!profilePhoto) {
           setProfilePhoto(enhancedUri);
         } else if (galleryPhotos.length < MAX) {
-          setGalleryPhotos(prev => [enhancedUri, ...prev]);
+          setGalleryPhotos((prev) => [enhancedUri, ...prev]);
         } else {
           Alert.alert('Limit Reached', `You can only upload ${MAX} photos.`);
         }
@@ -117,9 +117,9 @@ const SignupStepTen = () => {
     }
   };
 
-  const deletePhoto = (uri) => {
+  const deletePhoto = (uri: string) => {
     if (uri === profilePhoto) setProfilePhoto(null);
-    else setGalleryPhotos(prev => prev.filter(p => p !== uri));
+    else setGalleryPhotos((prev) => prev.filter((p) => p !== uri));
   };
 
   const handleFinish = async () => {
@@ -136,17 +136,17 @@ const SignupStepTen = () => {
     const { data: userData, error } = await supabase.auth.getUser();
     if (error || !userData?.user?.id || !userData.user.email) {
       Alert.alert('Session Error', 'Please log in again.');
-      navigation.navigate('Login');
+      navigation.navigate('Login' as never);
       return;
     }
 
     try {
       const profileUrl = await uploadToSupabase(profilePhoto, userData.user.id, true);
       const galleryUrls = await Promise.all(
-        galleryPhotos.map(uri => uploadToSupabase(uri, userData.user.id))
+        galleryPhotos.map((uri) => uploadToSupabase(uri, userData.user.id))
       );
 
-      const successful = profileUrl && galleryUrls.every(url => url);
+      const successful = !!profileUrl && galleryUrls.every((url) => !!url);
       if (!successful) {
         Alert.alert('Upload Failed', 'Some images failed to upload. Please try again.');
         return;
@@ -158,8 +158,8 @@ const SignupStepTen = () => {
         screenname,
         first_name,
         phone,
-        profile_photo: profileUrl,
-        gallery_photos: galleryUrls,
+        profile_photo: profileUrl!,
+        gallery_photos: galleryUrls as string[],
         current_step: 'ProfileSetupStepTen',
         has_completed_profile: true,
       });
@@ -169,12 +169,12 @@ const SignupStepTen = () => {
         return;
       }
 
-      navigation.navigate('ProfileSetupStepEleven', {
+      navigation.navigate('ProfileSetupStepEleven' as never, {
         userId: userData.user.id,
         screenname,
         first_name,
         phone,
-      });
+      } as never);
     } catch (err) {
       Alert.alert('Unexpected Error', 'Please try again.');
     } finally {
@@ -182,11 +182,11 @@ const SignupStepTen = () => {
     }
   };
 
-  const renderPhotoItem = ({ item }) => (
+  const renderPhotoItem = ({ item }: { item: string }) => (
     <View style={styles.gridItem}>
       <Image source={{ uri: item }} style={styles.gridImage} />
       <TouchableOpacity style={styles.deleteOverlay} onPress={() => deletePhoto(item)}>
-        <Ionicons name="close-circle" size={22} color="#fff" />
+        <Ionicons name="close-circle" size={22} color={DRYNKS_WHITE} />
       </TouchableOpacity>
     </View>
   );
@@ -194,7 +194,7 @@ const SignupStepTen = () => {
   return (
     <AnimatedScreenWrapper>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <Animated.View style={[styles.container, { opacity: fadeAnim }]}> 
+        <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
           <Text style={styles.header}>Lookin’ Good! 📸</Text>
           <Text style={styles.subtext}>Upload a profile pic and 3–10 gallery shots.</Text>
 
@@ -202,7 +202,13 @@ const SignupStepTen = () => {
           {profilePhoto ? (
             <TouchableOpacity onPress={() => pickImage(false)}>
               <Image source={{ uri: profilePhoto }} style={styles.profileImage} />
-              <Ionicons style={styles.profileDelete} name="close-circle" size={26} color={DRYNKS_RED} onPress={() => deletePhoto(profilePhoto)} />
+              <Ionicons
+                style={styles.profileDelete}
+                name="close-circle"
+                size={26}
+                color={DRYNKS_RED}
+                onPress={() => deletePhoto(profilePhoto)}
+              />
             </TouchableOpacity>
           ) : (
             <TouchableOpacity style={styles.uploadBox} onPress={() => pickImage(false)}>
@@ -245,9 +251,9 @@ const SignupStepTen = () => {
 
 const styles = StyleSheet.create({
   container: { flexGrow: 1, padding: 20, paddingBottom: 90, backgroundColor: DRYNKS_WHITE },
-  header: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
+  header: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 8, color: DRYNKS_BLUE },
   subtext: { fontSize: 14, color: DRYNKS_BLUE, textAlign: 'center', marginBottom: 16 },
-  label: { fontWeight: '600', marginVertical: 10 },
+  label: { fontWeight: '600', marginVertical: 10, color: '#23303A' },
   profileImage: { width: 120, height: 120, borderRadius: 60, alignSelf: 'center', marginBottom: 10 },
   profileDelete: { position: 'absolute', top: -5, right: '35%' },
   uploadBox: {
@@ -262,7 +268,7 @@ const styles = StyleSheet.create({
   gridImage: { width: '100%', height: '100%' },
   deleteOverlay: {
     position: 'absolute', top: 4, right: 4,
-    backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 11,
+    backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 11, padding: 2,
   },
   buttonRow: {
     flexDirection: 'row', justifyContent: 'space-between', marginTop: 10

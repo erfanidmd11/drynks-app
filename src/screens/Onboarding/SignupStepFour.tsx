@@ -20,6 +20,12 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const countryCodes = [
   { label: '+1 (US)', value: '+1' },
   { label: '+44 (UK)', value: '+44' },
@@ -33,13 +39,14 @@ const countryCodes = [
 ];
 
 const SignupStepFour = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
-  const { screenname, first_name } = route.params || {};
+  // Cast to avoid fighting global nav typing while we finish the root map
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { screenname, first_name } = route.params ?? {};
 
   const [countryCode, setCountryCode] = useState('+1');
   const [phone, setPhone] = useState('');
-  const [phoneAvailable, setPhoneAvailable] = useState(null);
+  const [phoneAvailable, setPhoneAvailable] = useState<boolean | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -47,30 +54,38 @@ const SignupStepFour = () => {
   useEffect(() => {
     if (phone.length >= 7) checkPhoneAvailability();
     else setPhoneAvailable(null);
-  }, [phone]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phone, countryCode]);
 
   const checkPhoneAvailability = async () => {
     const fullPhone = `${countryCode}${phone}`;
-    setChecking(true);
-    const { data: userData, error: authError } = await supabase.auth.getUser();
-    if (authError || !userData?.user?.id) {
+    try {
+      setChecking(true);
+      const { data: userData, error: authError } = await supabase.auth.getUser();
+      if (authError || !userData?.user?.id) {
+        setPhoneAvailable(null);
+        return;
+      }
+      const userId = userData.user.id;
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('phone', fullPhone);
+
+      if (error) {
+        console.error('[Phone Check Error]', error);
+        setPhoneAvailable(null);
+        return;
+      }
+
+      const isTakenBySomeoneElse = (data?.length ?? 0) > 0 && data![0].id !== userId;
+      setPhoneAvailable(!isTakenBySomeoneElse);
+    } catch (e) {
+      console.error('[Phone Check Error]', e);
       setPhoneAvailable(null);
+    } finally {
       setChecking(false);
-      return;
     }
-    const userId = userData.user.id;
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('phone', fullPhone);
-    setChecking(false);
-    if (error) {
-      console.error('[Phone Check Error]', error);
-      setPhoneAvailable(null);
-      return;
-    }
-    const isTakenBySomeoneElse = data.length > 0 && data[0].id !== userId;
-    setPhoneAvailable(!isTakenBySomeoneElse);
   };
 
   const handleNext = async () => {
@@ -101,7 +116,7 @@ const SignupStepFour = () => {
         return;
       }
 
-      const isTakenBySomeoneElse = existing.length > 0 && existing[0].id !== user.id;
+      const isTakenBySomeoneElse = (existing?.length ?? 0) > 0 && existing![0].id !== user.id;
 
       if (isTakenBySomeoneElse) {
         Alert.alert(
@@ -109,7 +124,7 @@ const SignupStepFour = () => {
           'That phone number is already linked to another account.',
           [
             { text: 'Change Number', style: 'cancel' },
-            { text: 'Go to Login', onPress: () => navigation.navigate('Login') },
+            { text: 'Go to Login', onPress: () => navigation.navigate('Login' as never) },
           ]
         );
         return;
@@ -126,13 +141,16 @@ const SignupStepFour = () => {
 
       if (upsertError) {
         console.error('[Supabase Upsert Error]', upsertError);
-        if (upsertError.message.includes('duplicate key') || upsertError.message.includes('phone')) {
+        if (
+          upsertError.message?.toLowerCase().includes('duplicate') ||
+          upsertError.message?.toLowerCase().includes('phone')
+        ) {
           Alert.alert(
             'Phone Number Already In Use',
             'That phone number is already linked to another account.',
             [
               { text: 'Change Number', style: 'cancel' },
-              { text: 'Go to Login', onPress: () => navigation.navigate('Login') },
+              { text: 'Go to Login', onPress: () => navigation.navigate('Login' as never) },
             ]
           );
         } else {
@@ -141,11 +159,11 @@ const SignupStepFour = () => {
         return;
       }
 
-      navigation.navigate('ProfileSetupStepFive', {
+      navigation.navigate('ProfileSetupStepFive' as never, {
         screenname,
         first_name,
         phone: fullPhone,
-      });
+      } as never);
     } catch (err) {
       console.error('[Unexpected Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong.');
@@ -184,7 +202,7 @@ const SignupStepFour = () => {
   );
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <SafeAreaView style={{ flex: 1 }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -195,6 +213,10 @@ const SignupStepFour = () => {
               <Text style={styles.header}>
                 {first_name ? `Hey ${first_name}, what's your number? 📱` : 'How Can We Reach You? 📱'}
               </Text>
+              <Text style={styles.subtext}>
+                Enter a phone number you can verify. This helps keep DrYnks safe.
+              </Text>
+
               <View style={styles.phoneRow}>
                 <Pressable style={styles.codeSelector} onPress={() => setModalVisible(true)}>
                   <Text style={styles.codeText}>{countryCode}</Text>
@@ -206,6 +228,7 @@ const SignupStepFour = () => {
                     keyboardType="phone-pad"
                     value={phone}
                     onChangeText={(text) => setPhone(text.replace(/[^0-9]/g, ''))}
+                    placeholderTextColor="#8A94A6"
                   />
                   {phone.length >= 7 && (
                     <Text style={styles.statusIcon}>
@@ -214,10 +237,15 @@ const SignupStepFour = () => {
                   )}
                 </View>
               </View>
+
               <View style={{ marginTop: 20 }}>
-                <OnboardingNavButtons onNext={handleNext} disabled={loading || phoneAvailable === false} />
+                <OnboardingNavButtons
+                  onNext={handleNext}
+                  {...({ disabled: loading || phoneAvailable === false } as any)}
+                />
                 {loading && <ActivityIndicator size="large" style={{ marginTop: 20 }} />}
               </View>
+
               {renderCountryModal()}
             </View>
           </TouchableWithoutFeedback>
@@ -232,13 +260,20 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 30,
+    fontWeight: '800',
+    marginBottom: 12,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
+  },
+  subtext: {
+    fontSize: 14,
+    color: '#55606B',
+    textAlign: 'center',
+    marginBottom: 18,
   },
   phoneRow: {
     flexDirection: 'row',
@@ -248,24 +283,27 @@ const styles = StyleSheet.create({
   codeSelector: {
     width: 100,
     height: 50,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
     borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#f8f8f8',
+    backgroundColor: DRYNKS_GRAY,
   },
   codeText: {
     fontSize: 16,
+    color: '#1F2A33',
   },
   phoneInput: {
     height: 50,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
     borderRadius: 8,
     paddingHorizontal: 10,
     fontSize: 16,
     paddingRight: 40,
+    backgroundColor: DRYNKS_GRAY,
+    color: '#1F2A33',
   },
   statusIcon: {
     position: 'absolute',
@@ -279,7 +317,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
   modalContent: {
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
     maxHeight: '40%',
     padding: 10,
     borderTopLeftRadius: 12,
@@ -291,6 +329,7 @@ const styles = StyleSheet.create({
   },
   countryText: {
     fontSize: 18,
+    color: '#1F2A33',
   },
 });
 

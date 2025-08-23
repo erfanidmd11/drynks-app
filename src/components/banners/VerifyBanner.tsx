@@ -31,7 +31,8 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
   const handleEmailVerify = async () => {
     setEmailLoading(true);
     try {
-      const { error } = await supabase.auth.resend({ type: 'email' });
+      const email = profile?.email;
+      const { error } = await supabase.auth.resend({ type: 'signup', email });
       if (error) throw error;
       setMessage('📬 Boom! Verification email is flying your way.');
     } catch (err: any) {
@@ -44,7 +45,7 @@ const VerifyBanner = ({ profile }: { profile: any }) => {
   const handlePhoneVerify = async () => {
     setPhoneLoading(true);
     try {
-      const { error } = await supabase.auth.verifyOtp({ type: 'sms', phone: profile.phone });
+      const { error } = await supabase.auth.signInWithOtp({ phone: profile.phone });
       if (error) throw error;
       setMessage('📱 Code sent! Check your texts.');
     } catch (err: any) {

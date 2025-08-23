@@ -4,7 +4,8 @@ import { createClient } from "npm:@supabase/supabase-js@2"
 Deno.serve(async () => {
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    Deno.env.get('SERVICE_ROLE_KEY')!
+
   )
 
   const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()

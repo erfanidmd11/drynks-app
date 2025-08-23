@@ -1,14 +1,15 @@
+// src/utils/credentials.ts
 import * as SecureStore from 'expo-secure-store';
 
 /**
  * Save user credentials securely in the device's keychain.
- * @param email User's email address
- * @param password User's password
+ * NOTE: For real production apps, you might want to avoid storing plain text passwords.
+ * Instead store refresh tokens or session identifiers.
  */
 export async function saveCredentials(email: string, password: string): Promise<void> {
   try {
-    await SecureStore.setItemAsync('user_email', email);
-    await SecureStore.setItemAsync('user_password', password);
+    await SecureStore.setItemAsync('user_email', email, { keychainService: 'dr-ynks' });
+    await SecureStore.setItemAsync('user_password', password, { keychainService: 'dr-ynks' });
   } catch (error) {
     console.error('[SecureStore] Failed to save credentials:', error);
   }
@@ -20,8 +21,8 @@ export async function saveCredentials(email: string, password: string): Promise<
  */
 export async function getCredentials(): Promise<{ email: string | null; password: string | null }> {
   try {
-    const email = await SecureStore.getItemAsync('user_email');
-    const password = await SecureStore.getItemAsync('user_password');
+    const email = await SecureStore.getItemAsync('user_email', { keychainService: 'dr-ynks' });
+    const password = await SecureStore.getItemAsync('user_password', { keychainService: 'dr-ynks' });
     return { email, password };
   } catch (error) {
     console.error('[SecureStore] Failed to get credentials:', error);
@@ -34,8 +35,8 @@ export async function getCredentials(): Promise<{ email: string | null; password
  */
 export async function clearCredentials(): Promise<void> {
   try {
-    await SecureStore.deleteItemAsync('user_email');
-    await SecureStore.deleteItemAsync('user_password');
+    await SecureStore.deleteItemAsync('user_email', { keychainService: 'dr-ynks' });
+    await SecureStore.deleteItemAsync('user_password', { keychainService: 'dr-ynks' });
   } catch (error) {
     console.error('[SecureStore] Failed to clear credentials:', error);
   }

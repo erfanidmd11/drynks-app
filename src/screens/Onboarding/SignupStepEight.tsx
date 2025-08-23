@@ -16,11 +16,18 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
-const SignupStepEight = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
 
-  const { screenname, first_name, phone } = route.params || {};
+const SignupStepEight = () => {
+  // Cast navigation/route so we don’t fight global types while finishing the root map
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+
+  const { screenname, first_name, phone } = route.params ?? {};
 
   const [instagram, setInstagram] = useState('');
   const [tiktok, setTiktok] = useState('');
@@ -32,7 +39,7 @@ const SignupStepEight = () => {
         'Missing Data',
         'Your signup session is missing required info. Please restart the signup process.'
       );
-      navigation.navigate('ProfileSetupStepOne');
+      navigation.navigate('ProfileSetupStepOne' as never);
       return;
     }
 
@@ -69,15 +76,15 @@ const SignupStepEight = () => {
       return;
     }
 
-    navigation.navigate('ProfileSetupStepNine', {
+    navigation.navigate('ProfileSetupStepNine' as never, {
       screenname,
       first_name,
       phone,
-    });
+    } as never);
   };
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -94,7 +101,7 @@ const SignupStepEight = () => {
               </Text>
               <Text style={styles.subtext}>
                 Drop your Instagram, TikTok, or Facebook handle — just one! This will never be shared,
-                it’s just our way of keeping DrYnks safe and spam-free for everyone. 🍸
+                it’s our way of keeping DrYnks safe and spam-free. 🍸
               </Text>
 
               <TextInput
@@ -125,6 +132,7 @@ const SignupStepEight = () => {
               />
 
               <View style={{ marginTop: 20 }}>
+                {/* No type changes to the component; we keep your usage the same */}
                 <OnboardingNavButtons onNext={handleNext} />
               </View>
             </View>
@@ -138,35 +146,38 @@ const SignupStepEight = () => {
 const styles = StyleSheet.create({
   scrollContainer: {
     flexGrow: 1,
+    backgroundColor: DRYNKS_WHITE,
   },
   inner: {
     paddingHorizontal: 20,
     paddingBottom: 40,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
     flexGrow: 1,
     justifyContent: 'center',
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 10,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
   },
   subtext: {
     fontSize: 14,
-    color: '#555',
+    color: '#55606B',
     textAlign: 'center',
     marginBottom: 20,
   },
   input: {
     height: 50,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
+    borderRadius: 10,
+    paddingHorizontal: 12,
     marginBottom: 15,
     fontSize: 16,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_GRAY,
+    color: '#1F2A33',
   },
 });
 

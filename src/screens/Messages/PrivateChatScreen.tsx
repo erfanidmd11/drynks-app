@@ -19,8 +19,8 @@ const DAILY_LIMIT = 3;
 
 const PrivateChatScreen = () => {
   const [mediaUri, setMediaUri] = useState('');
-  const route = useRoute();
-  const { otherUserId } = route.params || {};
+  const route = useRoute<any>();
+  const { otherUserId } = route.params ?? {};
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
@@ -31,8 +31,17 @@ const PrivateChatScreen = () => {
   const [expiresSoon, setExpiresSoon] = useState(false);
   const [typing, setTyping] = useState(false);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
-  const flatListRef = useRef(null);
+  const flatListRef = useRef<FlatList<any>>(null);
   let typingTimeout: any = useRef(null);
+
+  // Cache current user id once for render-time comparisons
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      setCurrentUserId(data?.user?.id ?? null);
+    })();
+  }, []);
 
   useEffect(() => {
     const setup = async () => {
@@ -45,7 +54,7 @@ const PrivateChatScreen = () => {
           const { new: msg } = payload;
           if (msg.user_id === otherUserId || msg.recipient_id === otherUserId) {
             setMessages(prev => [...prev, msg]);
-            flatListRef.current?.scrollToEnd({ animated: true });
+            flatListRef.current?.scrollToEnd?.({ animated: true });
           }
         })
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_typing' }, payload => {
@@ -56,6 +65,7 @@ const PrivateChatScreen = () => {
       return () => supabase.removeChannel(channel);
     };
     setup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleTyping = async (text: string) => {
@@ -77,7 +87,7 @@ const PrivateChatScreen = () => {
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
       .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-    if (count >= DAILY_LIMIT) setChatAllowed(false);
+    if ((count ?? 0) >= DAILY_LIMIT) setChatAllowed(false);
   };
 
   const insertJoinSystemMessage = async () => {
@@ -96,9 +106,9 @@ const PrivateChatScreen = () => {
 
   const fetchMessages = async () => {
     const { data: sessionData } = await supabase.auth.getSession();
-    const currentUserId = sessionData?.session?.user?.id;
+    const me = sessionData?.session?.user?.id;
     await supabase.from('chat_seen').upsert({
-      user_id: currentUserId,
+      user_id: me,
       date_id: null,
       recipient_id: otherUserId,
       last_seen: new Date().toISOString(),
@@ -132,38 +142,49 @@ const PrivateChatScreen = () => {
       Alert.alert('Limit Reached', 'You’ve opened 3 private chats today. Upgrade to unlock more.');
       return;
     }
-    if (!input.trim()) return;
+    if (!input.trim() && !mediaUri) return;
+
     const { data: userData } = await supabase.auth.getUser();
     const { user } = userData || {};
+
+    // Upload image if present
     let uploadedUrl = '';
     if (mediaUri) {
-      const filename = mediaUri.split('/').pop();
-      const { data: file, error: uploadError } = await supabase.storage.from('chat-media').upload(filename, {
-        uri: mediaUri,
-        type: 'image/jpeg',
-        name: filename
-      });
+      const filename = mediaUri.split('/').pop() || `chat-${Date.now()}.jpg`;
+      const { data: file, error: uploadError } = await supabase
+        .storage
+        .from('chat-media')
+        .upload(filename, {
+          uri: mediaUri,
+          type: 'image/jpeg',
+          name: filename,
+        } as any); // keep existing RN FormData-style body; TS accepts with 'any'
       if (!uploadError && file) {
-        const publicURL = supabase.storage.from('chat-media').getPublicUrl(file.path).data.publicURL;
+        const { data: pub } = supabase.storage.from('chat-media').getPublicUrl(file.path);
+        const publicURL = pub.publicUrl;
         uploadedUrl = publicURL;
       }
     }
+
     if (editMessage) {
-      await supabase.from('chat_messages').update({ content: input }).eq('id', editMessage.id);
+      await supabase.from('chat_messages').update({ content: input, media_url: uploadedUrl || null }).eq('id', editMessage.id);
       setEditMessage(null);
       fetchMessages();
       return;
     }
+
     await supabase.from('chat_messages').insert({
       content: input,
       user_id: user?.id,
       recipient_id: otherUserId,
       reply_to: replyTo?.id || null,
-      media_url: uploadedUrl,
+      media_url: uploadedUrl || null,
     });
+
     setInput('');
     setMediaUri('');
     setReplyTo(null);
+
     await supabase.from('notifications').insert({
       user_id: otherUserId,
       message: `${user?.user_metadata?.screenname || 'Someone'} sent you a message`,
@@ -173,13 +194,13 @@ const PrivateChatScreen = () => {
     });
   };
 
-  const scrollToMessage = (id) => {
+  const scrollToMessage = (id: string | number) => {
     const index = messages.findIndex(m => m.id === id);
-    if (index !== -1) flatListRef.current?.scrollToIndex({ index, animated: true });
+    if (index !== -1) flatListRef.current?.scrollToIndex?.({ index, animated: true });
   };
 
-  const renderMessage = ({ item }) => {
-    const isOwn = item.user_id === supabase.auth.getUser()?.data?.user?.id;
+  const renderMessage = ({ item }: { item: any }) => {
+    const isOwn = !!currentUserId && item.user_id === currentUserId;
     return (
       <Animated.View entering={FadeInUp} style={styles.messageBubble}>
         {item.reply_to && (
@@ -194,25 +215,37 @@ const PrivateChatScreen = () => {
         <Text style={styles.replyTap} onPress={() => setReplyTo(item)}>💬 Reply</Text>
         {isOwn && (
           <View style={styles.actions}>
-            <Text style={styles.edit} onPress={() => {
-              setInput(item.content);
-              setEditMessage(item);
-            }}>✏️ Edit</Text>
-            <Text style={styles.delete} onPress={async () => {
-              Alert.alert('Delete Message', 'Are you sure?', [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Delete', style: 'destructive', onPress: async () => {
-                    if (item.media_url) {
-                      const filename = item.media_url.split('/').pop();
-                      await supabase.storage.from('chat-media').remove([filename]);
-                    }
-                    await supabase.from('chat_messages').delete().eq('id', item.id);
-                    fetchMessages();
-                  }
-                }
-              ]);
-            }}>🗑 Delete</Text>
+            <Text
+              style={styles.edit}
+              onPress={() => {
+                setInput(item.content);
+                setEditMessage(item);
+              }}
+            >
+              ✏️ Edit
+            </Text>
+            <Text
+              style={styles.delete}
+              onPress={async () => {
+                Alert.alert('Delete Message', 'Are you sure?', [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                      if (item.media_url) {
+                        const filename = item.media_url.split('/').pop();
+                        if (filename) await supabase.storage.from('chat-media').remove([filename]);
+                      }
+                      await supabase.from('chat_messages').delete().eq('id', item.id);
+                      fetchMessages();
+                    },
+                  },
+                ]);
+              }}
+            >
+              🗑 Delete
+            </Text>
           </View>
         )}
       </Animated.View>
@@ -230,7 +263,9 @@ const PrivateChatScreen = () => {
           </View>
         )}
         {isOtherUserTyping && (
-          <Text style={{ fontStyle: 'italic', color: '#888', textAlign: 'center', marginVertical: 6 }}>Someone is typing...</Text>
+          <Text style={{ fontStyle: 'italic', color: '#888', textAlign: 'center', marginVertical: 6 }}>
+            Someone is typing...
+          </Text>
         )}
         <FlatList
           ref={flatListRef}

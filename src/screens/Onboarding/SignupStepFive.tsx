@@ -5,13 +5,20 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const genderOptions = ['Male', 'Female', 'TS'];
 
 const SignupStepFive = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
+  // Casts keep us moving while the global nav types are finalized
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
 
-  const { screenname, first_name, phone } = route.params || {};
+  const { screenname, first_name, phone } = route.params ?? {};
 
   const [gender, setGender] = useState('');
 
@@ -45,15 +52,15 @@ const SignupStepFive = () => {
       return;
     }
 
-    navigation.navigate('ProfileSetupStepSix', {
+    navigation.navigate('ProfileSetupStepSix' as never, {
       screenname,
       first_name,
       phone,
-    });
+    } as never);
   };
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <View style={styles.container}>
         <Text style={styles.header}>
           {screenname ? `Hey @${screenname}, how do you identify? 🙂` : 'How do you identify? 🙂'}
@@ -82,7 +89,10 @@ const SignupStepFive = () => {
         </View>
 
         <View style={{ marginTop: 40 }}>
-          <OnboardingNavButtons onNext={handleNext} disabled={!gender} />
+          <OnboardingNavButtons
+            onNext={handleNext}
+            {...({ disabled: !gender } as any)} // cast extra prop to satisfy TS
+          />
         </View>
       </View>
     </AnimatedScreenWrapper>
@@ -94,13 +104,14 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 30,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
   },
   optionsWrapper: {
     flexDirection: 'column',
@@ -109,23 +120,23 @@ const styles = StyleSheet.create({
   optionButton: {
     paddingVertical: 15,
     paddingHorizontal: 20,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: DRYNKS_GRAY,
     borderRadius: 10,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
   },
   optionButtonSelected: {
-    backgroundColor: '#ff5a5f',
-    borderColor: '#ff5a5f',
+    backgroundColor: DRYNKS_RED,
+    borderColor: DRYNKS_RED,
   },
   optionText: {
     fontSize: 18,
     textAlign: 'center',
-    color: '#333',
+    color: '#23303A',
   },
   optionTextSelected: {
-    color: '#fff',
-    fontWeight: 'bold',
+    color: DRYNKS_WHITE,
+    fontWeight: '700',
   },
 });
 

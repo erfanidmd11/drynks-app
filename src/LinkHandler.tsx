@@ -4,10 +4,10 @@ import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 
 const LinkHandler = () => {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
 
   useEffect(() => {
-    const handleDeepLink = async (event) => {
+    const handleDeepLink = async (event: { url: string }) => {
       const url = event.url;
       const parsed = Linking.parse(url);
 
@@ -46,22 +46,38 @@ const LinkHandler = () => {
 
           navigation.reset({
             index: 0,
-            routes: [{ name: step || 'App' }],
+            routes: [{ name: (step || 'App') as never }],
           });
         } else {
           console.warn('[DeepLink] No session found, routing to Login');
-          navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+          navigation.reset({ index: 0, routes: [{ name: 'Login' as never }] });
         }
       }
     };
 
+    // subscribe after a small delay (as in your original)
     const timeout = setTimeout(() => {
       console.log('[LinkHandler] Initializing deep link listener...');
       const sub = Linking.addEventListener('url', handleDeepLink);
-      return () => sub.remove();
+      // cleanup for the listener happens in the effect cleanup
+      (async () => {
+        const initialUrl = await Linking.getInitialURL();
+        if (initialUrl) await handleDeepLink({ url: initialUrl });
+      })();
+      // store sub on window to remove later if desired (optional)
+      // @ts-ignore
+      (global as any).__linkSub = sub;
     }, 2000);
 
-    return () => clearTimeout(timeout);
+    return () => {
+      clearTimeout(timeout);
+      // remove listener if it was created
+      // @ts-ignore
+      const sub = (global as any).__linkSub;
+      if (sub && typeof sub.remove === 'function') sub.remove();
+      // @ts-ignore
+      (global as any).__linkSub = undefined;
+    };
   }, [navigation]);
 
   return null;

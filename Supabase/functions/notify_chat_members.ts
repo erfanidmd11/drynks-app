@@ -1,6 +1,7 @@
-// notify_chat_members.ts – Supabase Edge Function
+// supabase/functions/notify_chat_members.ts
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 serve(async (req) => {
   try {
@@ -39,6 +40,10 @@ serve(async (req) => {
     const tokens = profiles
       .map(p => p.expo_push_token)
       .filter((t): t is string => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+
+    if (tokens.length === 0) {
+      return new Response(JSON.stringify({ error: 'No valid push tokens found' }), { status: 404 });
+    }
 
     // Send push via Expo
     const expoRes = await fetch('https://exp.host/--/api/v2/push/send', {

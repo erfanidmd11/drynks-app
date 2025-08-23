@@ -1,27 +1,41 @@
 {
-  "cli": {
-    "version": ">= 3.0.0",
-    "appVersionSource": "remote"
+  "cli": { 
+    "version": ">= 3.0.0", 
+    "appVersionSource": "local" 
   },
+
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "channel": "development",
       "env": {
-        "EXPO_NO_CAPABILITY_SYNC": "1"
-      },
-      "autoIncrement": true
+        "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
+        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+      }
     },
+
+    "staging": {
+      "developmentClient": false,
+      "distribution": "internal",
+      "channel": "staging",
+      "env": {
+        "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
+        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+      }
+    },
+
     "production": {
-      "channel": "production",
       "developmentClient": false,
       "distribution": "store",
+      "channel": "production",
       "env": {
-        "EXPO_NO_CAPABILITY_SYNC": "1"
-      },
-      "autoIncrement": true
+        "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
+        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+      }
     }
   },
+
   "submit": {
     "production": {
       "ios": {
@@ -32,5 +46,3 @@
     }
   }
 }
-
-

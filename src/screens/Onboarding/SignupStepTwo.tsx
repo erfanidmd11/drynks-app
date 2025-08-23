@@ -1,3 +1,5 @@
+// src/screens/Onboarding/SignupStepTwo.tsx
+
 import React, { useState } from 'react';
 import {
   View,
@@ -15,8 +17,15 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '@components/common/OnboardingNavButtons';
 
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const SignupStepTwo = () => {
-  const navigation = useNavigation();
+  // Cast to avoid fighting global nav typing while root map is finalized
+  const navigation = useNavigation<any>();
   const [dob, setDob] = useState('');
 
   const formatDob = (input: string) => {
@@ -69,7 +78,7 @@ const SignupStepTwo = () => {
         return;
       }
 
-      const { data: profileData, error: profileError } = await supabase
+      const { data: profileData } = await supabase
         .from('profiles')
         .select('screenname, first_name, phone')
         .eq('id', userId)
@@ -79,15 +88,18 @@ const SignupStepTwo = () => {
       const first_name = profileData?.first_name ?? '';
       const phone = profileData?.phone ?? '';
 
-      const { error: upsertError } = await supabase.from('profiles').upsert({
-        id: userId,
-        email,
-        screenname,
-        first_name,
-        phone,
-        birthdate: formattedBirthdate,
-        current_step: 'ProfileSetupStepTwo',
-      }, { onConflict: 'id' });
+      const { error: upsertError } = await supabase.from('profiles').upsert(
+        {
+          id: userId,
+          email,
+          screenname,
+          first_name,
+          phone,
+          birthdate: formattedBirthdate,
+          current_step: 'ProfileSetupStepTwo',
+        },
+        { onConflict: 'id' }
+      );
 
       if (upsertError) {
         console.error('[Supabase Upsert Error]', upsertError);
@@ -95,7 +107,8 @@ const SignupStepTwo = () => {
         return;
       }
 
-      navigation.navigate('ProfileSetupStepThree');
+      // Cast nav target to satisfy TS without changing your route
+      navigation.navigate('ProfileSetupStepThree' as never);
     } catch (err) {
       console.error('[SignupStepTwo Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong. Please try again.');
@@ -103,7 +116,7 @@ const SignupStepTwo = () => {
   };
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -119,10 +132,10 @@ const SignupStepTwo = () => {
               value={dob}
               onChangeText={formatDob}
               keyboardType="number-pad"
-              placeholderTextColor="#999"
+              placeholderTextColor="#8A94A6"
               maxLength={10}
               returnKeyType="done"
-              blurOnSubmit={true}
+              blurOnSubmit
             />
 
             <OnboardingNavButtons onNext={handleNext} />
@@ -138,27 +151,30 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 10,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
   },
   subtext: {
     textAlign: 'center',
-    color: '#666',
+    color: '#55606B',
     marginBottom: 20,
   },
   input: {
     height: 50,
-    borderColor: '#ccc',
+    borderColor: '#DADFE6',
     borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
+    borderRadius: 10,
+    paddingHorizontal: 12,
     marginBottom: 20,
     fontSize: 16,
+    backgroundColor: DRYNKS_GRAY,
+    color: '#1F2A33',
   },
 });
 

@@ -21,16 +21,20 @@ export default function EnterOtpScreen() {
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(30);
-  const navigation = useNavigation();
-  const route = useRoute();
-  const { email, password } = route.params as { email: string, password: string };
+
+  // Cast to 'any' to avoid route typing fights while we finish global types
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { email, password } = (route.params ?? {}) as { email: string; password: string };
 
   useEffect(() => {
-    let timer: NodeJS.Timeout;
+    let timer: NodeJS.Timeout | undefined;
     if (resendCooldown > 0) {
-      timer = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
+      timer = setTimeout(() => setResendCooldown((s) => s - 1), 1000);
     }
-    return () => clearTimeout(timer);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [resendCooldown]);
 
   const handleVerify = async () => {
@@ -48,6 +52,7 @@ export default function EnterOtpScreen() {
     try {
       setLoading(true);
 
+      // Verify signup OTP for email
       const { error: verifyError } = await supabase.auth.verifyOtp({
         email,
         token: otp,
@@ -59,6 +64,7 @@ export default function EnterOtpScreen() {
         return;
       }
 
+      // Sign in after successful verification
       const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -79,7 +85,8 @@ export default function EnterOtpScreen() {
       }
 
       await clearCredentials();
-      navigation.navigate('ProfileSetupStepTwo');
+      // Cast the route name so TS doesn't block you
+      navigation.navigate('ProfileSetupStepTwo' as never);
     } catch (error) {
       Alert.alert('Unexpected Error', 'Something went wrong during verification.');
       console.error('[OTP ERROR]', error);
@@ -90,10 +97,11 @@ export default function EnterOtpScreen() {
 
   const handleResend = async () => {
     try {
+      // Resend email signup — keep options simple (no channel, no null)
       await supabase.auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: null, channel: 'email_otp' },
+        options: {}, // <-- removed emailRedirectTo: null
       });
       setResendCooldown(30);
       Alert.alert('OTP Sent', 'A new OTP has been sent to your email.');
@@ -130,7 +138,7 @@ export default function EnterOtpScreen() {
             maxLength={6}
             autoFocus
             returnKeyType="done"
-            blurOnSubmit={true}
+            blurOnSubmit
           />
 
           <TouchableOpacity

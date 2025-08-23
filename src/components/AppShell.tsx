@@ -1,33 +1,38 @@
-// AppShell.tsx (Crash-Proof and Stable)
+// src/components/common/AppShell.tsx
+// Crash-proof, safe-area aware wrapper
+
 import React from 'react';
-import { View, StyleSheet, StatusBar, Platform } from 'react-native';
+import { View, StyleSheet, StatusBar } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 interface Props {
   children: React.ReactNode;
-  currentTab?: string;
+  currentTab?: string;                 // kept for compatibility (unused)
+  includeBottomSafeArea?: boolean;     // set true on screens without a tab bar/footer
+  backgroundColor?: string;
 }
 
-const AppShell = ({ children }: Props) => {
+const AppShell = ({
+  children,
+  currentTab,
+  includeBottomSafeArea = false,
+  backgroundColor = '#fff',
+}: Props) => {
   return (
-    <View style={styles.container}>
-      <StatusBar
-        barStyle={Platform.OS === 'ios' ? 'dark-content' : 'light-content'}
-        backgroundColor="#fff"
-      />
+    <SafeAreaView
+      style={[styles.container, { backgroundColor }]}
+      edges={includeBottomSafeArea ? ['top', 'bottom', 'left', 'right'] : ['top', 'left', 'right']}
+    >
+      {/* iOS ignores backgroundColor; Android uses it. Keep dark icons on light bg. */}
+      <StatusBar barStyle="dark-content" backgroundColor={backgroundColor} translucent={false} />
       <View style={styles.content}>{children}</View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  content: {
-    flex: 1,
-    paddingTop: Platform.OS === 'android' ? 30 : 0,
-  },
+  container: { flex: 1 },
+  content:   { flex: 1 },
 });
 
 export default AppShell;

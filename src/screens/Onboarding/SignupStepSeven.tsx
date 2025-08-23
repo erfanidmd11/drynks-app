@@ -1,3 +1,5 @@
+// src/screens/Onboarding/SignupStepSeven.tsx
+
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -5,11 +7,18 @@ import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 
-const SignupStepSeven = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
+// ---- Brand colors (ONE source of truth) ----
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_GRAY = '#F1F4F7';
+const DRYNKS_WHITE = '#FFFFFF';
 
-  const { screenname, first_name, phone } = route.params || {};
+const SignupStepSeven = () => {
+  // Casts avoid fighting global nav typing while root map is finalized
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+
+  const { screenname, first_name, phone } = route.params ?? {};
 
   const [accepted, setAccepted] = useState(false);
 
@@ -43,29 +52,30 @@ const SignupStepSeven = () => {
       return;
     }
 
-    navigation.navigate('ProfileSetupStepEight', {
+    navigation.navigate('ProfileSetupStepEight' as never, {
       screenname,
       first_name,
       phone,
-    });
+    } as never);
   };
 
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <View style={styles.container}>
         <Text style={styles.header}>
           {screenname ? `The Fine Print, @${screenname} 📜` : 'The Fine Print 📜'}
         </Text>
         <Text style={styles.subtext}>
-          By using DrYnks, you agree to our Terms of Use and Privacy Policy. It's our way of keeping the vibe safe, respectful, and spam-free.
+          By using DrYnks, you agree to our Terms of Use and Privacy Policy. It helps keep the vibe safe,
+          respectful, and spam-free.
         </Text>
 
         <ScrollView style={styles.termsBox}>
           <Text style={styles.termsText}>
-            - You must be 18+ to use DrYnks.{"\n"}
-            - Respect all users — no harassment or hate speech.{"\n"}
-            - No spamming or fake profiles.{"\n"}
-            - We value your privacy. We don’t sell your data.
+            • You must be 18+ to use DrYnks.{'\n'}
+            • Respect all users — no harassment or hate speech.{'\n'}
+            • No spamming or fake profiles.{'\n'}
+            • We value your privacy. We don’t sell your data.
           </Text>
         </ScrollView>
 
@@ -74,7 +84,10 @@ const SignupStepSeven = () => {
           <Text style={styles.acceptText}>I agree to the Terms of Use and Privacy Policy</Text>
         </TouchableOpacity>
 
-        <OnboardingNavButtons onNext={handleNext} disabled={!accepted} />
+        <OnboardingNavButtons
+          onNext={handleNext}
+          {...({ disabled: !accepted } as any)}  // cast extra prop to satisfy TS
+        />
       </View>
     </AnimatedScreenWrapper>
   );
@@ -84,44 +97,50 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     paddingHorizontal: 20,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
     justifyContent: 'center',
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 10,
     textAlign: 'center',
+    color: DRYNKS_BLUE,
   },
   subtext: {
     fontSize: 14,
-    color: '#555',
+    color: '#55606B',
     textAlign: 'center',
     marginBottom: 20,
   },
   termsBox: {
-    maxHeight: 150,
+    maxHeight: 160,
     marginBottom: 20,
-    padding: 10,
-    borderColor: '#ccc',
+    padding: 12,
+    borderColor: '#DADFE6',
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: 10,
+    backgroundColor: DRYNKS_GRAY,
   },
   termsText: {
     fontSize: 14,
-    color: '#333',
+    color: '#23303A',
+    lineHeight: 20,
   },
   acceptRow: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 20,
+    justifyContent: 'center',
   },
   checkbox: {
     fontSize: 20,
     marginRight: 10,
+    color: DRYNKS_BLUE,
   },
   acceptText: {
     fontSize: 14,
+    color: '#23303A',
   },
 });
 

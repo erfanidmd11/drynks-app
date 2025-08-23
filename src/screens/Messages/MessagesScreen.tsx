@@ -22,7 +22,7 @@ const MessagesScreen = () => {
   const [dateThreads, setDateThreads] = useState<any[]>([]);
   const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>({});
   const [loading, setLoading] = useState(true);
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>(); // ✅ typed to avoid “never” errors
 
   const fetchUserDates = useCallback(async () => {
     setLoading(true);
@@ -91,7 +91,8 @@ const MessagesScreen = () => {
         return;
       }
 
-      navigation.navigate('ChatScreen', { dateId });
+      // ✅ Cast to satisfy TS without changing your route name/params
+      navigation.navigate('ChatScreen' as never, { dateId } as never);
     } catch (err) {
       console.error('[Chat Open Error]', err);
       Alert.alert('Error', 'Failed to open chat.');
