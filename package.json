@@ -69,7 +69,8 @@
     "react-native-vector-icons": "9.2.0",
     "recoil": "^0.7.7",
     "tz-lookup": "^6.1.25",
-    "yup": "1.2.0"
+    "yup": "1.2.0",
+    "expo-apple-authentication": "~7.2.4"
   },
   "devDependencies": {
     "@babel/core": "^7.23.9",
