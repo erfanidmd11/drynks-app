@@ -1,7 +1,8 @@
 // PrivateChatScreen.tsx – Final Production Ready with Typing Indicator + All Features
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, KeyboardAvoidingView, Platform, Alert, Image
+  View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
+  KeyboardAvoidingView, Platform, Alert, Image
 } from 'react-native';
 import { useRoute } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -9,6 +10,10 @@ import AppShell from '@components/AppShell';
 import EmojiSelector from 'react-native-emoji-selector';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system';
+import { decode as atob } from 'base-64';
+import Avatar from '../../ui/Avatar'; // ✅ NEW
 
 const DRYNKS_RED = '#E34E5C';
 const DRYNKS_BLUE = '#232F39';
@@ -16,6 +21,7 @@ const DRYNKS_GRAY = '#E1EBF2';
 const DRYNKS_WHITE = '#FFFFFF';
 
 const DAILY_LIMIT = 3;
+const CHAT_BUCKET = 'chat-media'; // keep your existing bucket name
 
 const PrivateChatScreen = () => {
   const [mediaUri, setMediaUri] = useState('');
@@ -29,7 +35,6 @@ const PrivateChatScreen = () => {
   const [replyTo, setReplyTo] = useState<any>(null);
   const [editMessage, setEditMessage] = useState<any>(null);
   const [expiresSoon, setExpiresSoon] = useState(false);
-  const [typing, setTyping] = useState(false);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
   const flatListRef = useRef<FlatList<any>>(null);
   let typingTimeout: any = useRef(null);
@@ -42,6 +47,19 @@ const PrivateChatScreen = () => {
       setCurrentUserId(data?.user?.id ?? null);
     })();
   }, []);
+
+  // ✅ NEW: load other user's profile so we can show their avatar
+  const [otherProfile, setOtherProfile] = useState<{ id: string; screenname: string | null; profile_photo: string | null } | null>(null);
+  useEffect(() => {
+    if (!otherUserId) return;
+    supabase
+      .from('profiles')
+      .select('id, screenname, profile_photo')
+      .eq('id', otherUserId)
+      .single()
+      .then(({ data }) => setOtherProfile(data as any))
+      .catch(() => {});
+  }, [otherUserId]);
 
   useEffect(() => {
     const setup = async () => {
@@ -128,13 +146,68 @@ const PrivateChatScreen = () => {
     setLoading(false);
   };
 
+  // ── FIX 1: Updated to new ImagePicker API + permission check ────────────────────
   const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission required', 'We need access to your photos to continue.');
+      return;
+    }
+
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ImagePicker.MediaType.Images, // ✅ new API
       allowsEditing: true,
-      quality: 0.7,
+      quality: 0.8,
     });
-    if (!result.canceled) setMediaUri(result.assets[0].uri);
+
+    if (!result.canceled && result.assets?.length) {
+      setMediaUri(result.assets[0].uri);
+    }
+  };
+
+  // RN-safe base64 -> Uint8Array (prevents zero-byte uploads)
+  function base64ToUint8Array(b64: string): Uint8Array {
+    const bin =
+      typeof (globalThis as any).atob === 'function'
+        ? (globalThis as any).atob(b64)
+        : atob(b64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  // Normalize to JPEG and upload bytes to Supabase Storage; returns public URL
+  const uploadMediaIfAny = async (): Promise<string> => {
+    if (!mediaUri) return '';
+
+    // Normalize/resize to JPEG to avoid HEIC/WebP/ph:// problems
+    const manipulated = await ImageManipulator.manipulateAsync(
+      mediaUri,
+      [{ resize: { width: 1280 } }],
+      { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
+    );
+
+    const fileName = `${Date.now()}_${(manipulated.uri.split('/').pop() || 'image')}.jpg`;
+
+    // Read as base64 → bytes
+    const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const bytes = base64ToUint8Array(base64);
+
+    const { data, error } = await supabase.storage
+      .from(CHAT_BUCKET)
+      .upload(fileName, bytes, {
+        contentType: 'image/jpeg',
+        upsert: true,
+        cacheControl: '3600',
+      });
+
+    if (error || !data) return '';
+
+    const { data: pub } = supabase.storage.from(CHAT_BUCKET).getPublicUrl(data.path);
+    return pub?.publicUrl ?? '';
   };
 
   const sendMessage = async () => {
@@ -147,34 +220,21 @@ const PrivateChatScreen = () => {
     const { data: userData } = await supabase.auth.getUser();
     const { user } = userData || {};
 
-    // Upload image if present
-    let uploadedUrl = '';
-    if (mediaUri) {
-      const filename = mediaUri.split('/').pop() || `chat-${Date.now()}.jpg`;
-      const { data: file, error: uploadError } = await supabase
-        .storage
-        .from('chat-media')
-        .upload(filename, {
-          uri: mediaUri,
-          type: 'image/jpeg',
-          name: filename,
-        } as any); // keep existing RN FormData-style body; TS accepts with 'any'
-      if (!uploadError && file) {
-        const { data: pub } = supabase.storage.from('chat-media').getPublicUrl(file.path);
-        const publicURL = pub.publicUrl;
-        uploadedUrl = publicURL;
-      }
-    }
+    // ── FIX 2: Robust upload path ────────────────────────────────────────────────
+    const uploadedUrl = await uploadMediaIfAny();
 
     if (editMessage) {
-      await supabase.from('chat_messages').update({ content: input, media_url: uploadedUrl || null }).eq('id', editMessage.id);
+      await supabase
+        .from('chat_messages')
+        .update({ content: input.trim(), media_url: uploadedUrl || null })
+        .eq('id', editMessage.id);
       setEditMessage(null);
       fetchMessages();
       return;
     }
 
     await supabase.from('chat_messages').insert({
-      content: input,
+      content: input.trim(),
       user_id: user?.id,
       recipient_id: otherUserId,
       reply_to: replyTo?.id || null,
@@ -202,53 +262,56 @@ const PrivateChatScreen = () => {
   const renderMessage = ({ item }: { item: any }) => {
     const isOwn = !!currentUserId && item.user_id === currentUserId;
     return (
-      <Animated.View entering={FadeInUp} style={styles.messageBubble}>
-        {item.reply_to && (
-          <Text style={styles.replyHint}>
-            ↩️ Replying to: {messages.find(m => m.id === item.reply_to)?.content}
-            <Text onPress={() => scrollToMessage(item.reply_to)} style={{ color: DRYNKS_BLUE, marginLeft: 6 }}> [Jump]</Text>
-          </Text>
-        )}
-        <Text style={styles.messageText}>{item.content}</Text>
-        {item.media_url && <Image source={{ uri: item.media_url }} style={styles.image} />}
-        <Text style={styles.timestamp}>{new Date(item.created_at).toLocaleTimeString()}</Text>
-        <Text style={styles.replyTap} onPress={() => setReplyTo(item)}>💬 Reply</Text>
-        {isOwn && (
-          <View style={styles.actions}>
-            <Text
-              style={styles.edit}
-              onPress={() => {
-                setInput(item.content);
-                setEditMessage(item);
-              }}
-            >
-              ✏️ Edit
+      <View style={[styles.msgRow, isOwn ? { justifyContent: 'flex-end' } : { justifyContent: 'flex-start' }]}>
+        {!isOwn && <Avatar url={otherProfile?.profile_photo || undefined} size={26} style={{ marginRight: 6 }} />}
+        <Animated.View entering={FadeInUp} style={[styles.messageBubble, isOwn && styles.messageBubbleOwn]}>
+          {item.reply_to && (
+            <Text style={styles.replyHint}>
+              ↩️ Replying to: {messages.find(m => m.id === item.reply_to)?.content}
+              <Text onPress={() => scrollToMessage(item.reply_to)} style={{ color: DRYNKS_BLUE, marginLeft: 6 }}> [Jump]</Text>
             </Text>
-            <Text
-              style={styles.delete}
-              onPress={async () => {
-                Alert.alert('Delete Message', 'Are you sure?', [
-                  { text: 'Cancel', style: 'cancel' },
-                  {
-                    text: 'Delete',
-                    style: 'destructive',
-                    onPress: async () => {
-                      if (item.media_url) {
-                        const filename = item.media_url.split('/').pop();
-                        if (filename) await supabase.storage.from('chat-media').remove([filename]);
-                      }
-                      await supabase.from('chat_messages').delete().eq('id', item.id);
-                      fetchMessages();
+          )}
+          <Text style={styles.messageText}>{item.content}</Text>
+          {item.media_url && <Image source={{ uri: item.media_url }} style={styles.image} />}
+          <Text style={styles.timestamp}>{new Date(item.created_at).toLocaleTimeString()}</Text>
+          <Text style={styles.replyTap} onPress={() => setReplyTo(item)}>💬 Reply</Text>
+          {isOwn && (
+            <View style={styles.actions}>
+              <Text
+                style={styles.edit}
+                onPress={() => {
+                  setInput(item.content);
+                  setEditMessage(item);
+                }}
+              >
+                ✏️ Edit
+              </Text>
+              <Text
+                style={styles.delete}
+                onPress={async () => {
+                  Alert.alert('Delete Message', 'Are you sure?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Delete',
+                      style: 'destructive',
+                      onPress: async () => {
+                        if (item.media_url) {
+                          const filename = item.media_url.split('/').pop();
+                          if (filename) await supabase.storage.from(CHAT_BUCKET).remove([filename]);
+                        }
+                        await supabase.from('chat_messages').delete().eq('id', item.id);
+                        fetchMessages();
+                      },
                     },
-                  },
-                ]);
-              }}
-            >
-              🗑 Delete
-            </Text>
-          </View>
-        )}
-      </Animated.View>
+                  ]);
+                }}
+              >
+                🗑 Delete
+              </Text>
+            </View>
+          )}
+        </Animated.View>
+      </View>
     );
   };
 
@@ -306,12 +369,14 @@ const PrivateChatScreen = () => {
 };
 
 const styles = StyleSheet.create({
+  msgRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 12, gap: 6 }, // ✅ NEW
   messageBubble: {
     backgroundColor: DRYNKS_GRAY,
     padding: 12,
     borderRadius: 10,
-    marginBottom: 12,
+    maxWidth: '80%',
   },
+  messageBubbleOwn: { backgroundColor: '#FFE5E9' }, // subtle tint for own messages
   messageText: { fontSize: 16 },
   timestamp: { fontSize: 12, color: '#888', marginTop: 4 },
   replyTap: { fontSize: 12, color: DRYNKS_BLUE, marginTop: 4 },

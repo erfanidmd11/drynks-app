@@ -1,5 +1,5 @@
-// src/screens/Auth/LoginScreen.tsx
-// Production-ready: keyboard-safe, brand styled, trimmed input, safe Quick Unlock guards.
+// Production-ready: keyboard-safe, brand styled, trimmed input, safe Quick Unlock guards,
+// robust error mapping, reset password, optional magic-link sign-in.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -18,11 +18,13 @@ import {
   AppStateStatus,
   InteractionManager,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
+import { AuthApiError } from '@supabase/supabase-js';
 
 // ---- Brand colors (ONE source of truth) ----
 const DRYNKS_RED = '#E34E5C';
@@ -73,6 +75,9 @@ const LoginScreen: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
+  // Busy state to prevent double-submits
+  const [busy, setBusy] = useState(false);
+
   // Quick Unlock
   const [supportsQuick, setSupportsQuick] = useState(false);
   const [quickEnabled, setQuickEnabled] = useState(false);
@@ -84,6 +89,13 @@ const LoginScreen: React.FC = () => {
 
   const emailTrimmed = email.trim().toLowerCase();
   const formValid = isEmailValid(emailTrimmed) && password.length > 0;
+
+  // Debug: log which Supabase project this build points at (ENV mismatches cause invalid-credentials)
+  useEffect(() => {
+    // @ts-expect-error – not public API; safe for debug
+    const debugUrl: string | undefined = (supabase as any)?.rest?.url || (supabase as any)?.supabaseUrl;
+    console.log('[Auth] Using Supabase URL:', debugUrl || '(unknown)');
+  }, []);
 
   // Route after successful auth
   const routeAfterAuth = useCallback(async () => {
@@ -182,28 +194,62 @@ const LoginScreen: React.FC = () => {
     };
   }, [supportsQuick, quickEnabled, routeAfterAuth]);
 
+  const mapAuthError = (err: unknown): { title: string; msg: string } => {
+    const def = { title: 'Login Error', msg: 'Something went wrong during login.' };
+    if (!err) return def;
+
+    const anyErr = err as any;
+    const raw = (anyErr?.message || '').toString();
+    const msg = raw.toLowerCase();
+
+    // Supabase-specific errors
+    if (anyErr instanceof AuthApiError) {
+      if (anyErr.status === 429) return { title: 'Too Many Attempts', msg: 'Please wait a moment and try again.' };
+      if (anyErr.status === 400 && msg.includes('invalid login credentials')) {
+        return {
+          title: 'Login Failed',
+          msg: 'Invalid email or password, or the account does not exist in this environment.',
+        };
+      }
+      if (msg.includes('email not confirmed')) {
+        return { title: 'Email Not Verified', msg: 'Please verify your email before continuing.' };
+      }
+      return { title: 'Auth Error', msg: raw || def.msg };
+    }
+
+    // Network / fetch errors
+    if (msg.includes('network') || msg.includes('fetch') || msg.includes('failed to fetch')) {
+      return { title: 'Network Error', msg: 'Please check your connection and try again.' };
+    }
+
+    // Fallback
+    return { title: 'Login Error', msg: raw || def.msg };
+  };
+
   const handleLogin = async () => {
-    if (!formValid) {
-      Alert.alert('Invalid input', 'Please enter a valid email and password.');
+    if (!formValid || busy) {
+      if (!formValid) Alert.alert('Invalid input', 'Please enter a valid email and password.');
       return;
     }
 
     try {
+      setBusy(true);
+      Keyboard.dismiss();
+
       const { data, error } = await supabase.auth.signInWithPassword({
         email: emailTrimmed,
         password,
       });
 
       if (error) {
-        const msg = (error.message || '').toLowerCase();
-        if (msg.includes('invalid login credentials')) {
-          Alert.alert('Login Failed', 'We couldn’t find your account. Please sign up first.');
-        } else {
-          Alert.alert('Login Error', error.message);
-        }
+        console.warn('[Auth] signInWithPassword error:', error);
+        const { title, msg } = mapAuthError(error);
+        Alert.alert(title, msg);
         return;
       }
 
+      // If your project requires email confirmation before session issuance,
+      // Supabase may still return a user without a confirmed email.
       if (!data?.user?.email_confirmed_at) {
         Alert.alert('Email Not Verified', 'Please verify your email before continuing.');
         return;
@@ -222,15 +268,54 @@ const LoginScreen: React.FC = () => {
       await routeAfterAuth();
     } catch (e) {
       console.error('[Login Error]', e);
-      Alert.alert('Unexpected Error', 'Something went wrong during login.');
+      const { title, msg } = mapAuthError(e);
+      Alert.alert(title, msg);
+    } finally {
+      setBusy(false);
     }
   };
 
-  const handleForgotPassword = () => {
-    Alert.alert(
-      'Reset Password',
-      'Please contact support to reset your password or use the Supabase reset email system.'
-    );
+  const handleForgotPassword = async () => {
+    if (!isEmailValid(emailTrimmed)) {
+      Alert.alert('Enter your email', 'Please enter the email you registered with, then try again.');
+      return;
+    }
+    try {
+      setBusy(true);
+      // IMPORTANT: set your auth redirect in Supabase Auth settings to a deep link you handle
+      await supabase.auth.resetPasswordForEmail(emailTrimmed, {
+        redirectTo: 'dr-ynks://password-reset',
+      });
+      Alert.alert('Check your email', 'We sent you a password reset link.');
+    } catch (e) {
+      console.error('[Reset Password Error]', e);
+      const { title, msg } = mapAuthError(e);
+      Alert.alert(title, msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Optional: Magic link sign-in if you want a no-password fallback
+  const handleMagicLink = async () => {
+    if (!isEmailValid(emailTrimmed)) {
+      Alert.alert('Enter your email', 'Please enter a valid email address.');
+      return;
+    }
+    try {
+      setBusy(true);
+      await supabase.auth.signInWithOtp({
+        email: emailTrimmed,
+        options: { emailRedirectTo: 'dr-ynks://auth-callback', shouldCreateUser: false },
+      });
+      Alert.alert('Check your email', 'We sent you a sign-in link.');
+    } catch (e) {
+      console.error('[Magic Link Error]', e);
+      const { title, msg } = mapAuthError(e);
+      Alert.alert(title, msg);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleQuickUnlockPress = async () => {
@@ -269,7 +354,7 @@ const LoginScreen: React.FC = () => {
               </Text>
 
               {supportsQuick && quickEnabled ? (
-                <TouchableOpacity style={[styles.quickBtn, { marginBottom: 16 }]} onPress={handleQuickUnlockPress}>
+                <TouchableOpacity style={[styles.quickBtn, { marginBottom: 16 }]} onPress={handleQuickUnlockPress} disabled={busy}>
                   <Ionicons name="lock-open-outline" size={18} color={DRYNKS_WHITE} />
                   <Text style={styles.quickBtnText}>Use Face ID / Passcode</Text>
                 </TouchableOpacity>
@@ -308,19 +393,23 @@ const LoginScreen: React.FC = () => {
               </View>
 
               <TouchableOpacity
-                style={[styles.button, !formValid ? styles.buttonDisabled : null]}
+                style={[styles.button, (!formValid || busy) ? styles.buttonDisabled : null]}
                 onPress={handleLogin}
-                disabled={!formValid}
+                disabled={!formValid || busy}
                 activeOpacity={0.9}
               >
-                <Text style={styles.buttonText}>Login</Text>
+                {busy ? <ActivityIndicator color={DRYNKS_WHITE} /> : <Text style={styles.buttonText}>Login</Text>}
               </TouchableOpacity>
 
-              <TouchableOpacity onPress={handleForgotPassword}>
+              <TouchableOpacity onPress={handleForgotPassword} disabled={busy}>
                 <Text style={styles.linkText}>Forgot Password?</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne' as any)}>
+              <TouchableOpacity onPress={handleMagicLink} disabled={busy}>
+                <Text style={styles.linkText}>Email me a sign‑in link</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={() => navigation.navigate('ProfileSetupStepOne' as any)} disabled={busy}>
                 <Text style={styles.signupText}>
                   Don&apos;t have an account? <Text style={styles.signupHighlight}>Sign up</Text>
                 </Text>
@@ -416,7 +505,7 @@ const styles = StyleSheet.create({
   },
   linkText: {
     color: DRYNKS_BLUE,
-    marginBottom: 15,
+    marginBottom: 10,
   },
   signupText: {
     color: DRYNKS_BLUE,

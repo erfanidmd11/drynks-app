@@ -1,39 +1,39 @@
 // src/utils/biometrics.ts
-// Crash-safe facade for biometrics with NO runtime import of expo-local-authentication.
-// Works even if the native module isn't in the binary (always returns safe fallbacks).
+// Crash-safe facade for biometrics with dynamic import of expo-local-authentication.
+// Works even if the native module isn't in the binary (returns safe fallbacks).
+// Honors EXPO_PUBLIC_DISABLE_BIOMETRICS (1/true => disabled).
 
 import { AppState, AppStateStatus, InteractionManager, Platform } from 'react-native';
 import Constants from 'expo-constants';
 
 export type AuthResult = { success: boolean; error?: string };
 
-// --- Kill switch (default DISABLED = '1') ---
-function readBioFlag(): string {
-  // Avoid TS/node type noise by accessing process via any
-  const envFromProcess = ((process as any)?.env?.EXPO_PUBLIC_DISABLE_BIOMETRICS ?? '') as string;
-  const envFromConfig = (((Constants as any)?.expoConfig?.extra?.EXPO_PUBLIC_DISABLE_BIOMETRICS) ??
-    '') as string;
-  return String(envFromProcess || envFromConfig || '1');
-}
-const RAW = readBioFlag();
-export const BIO_DISABLED: boolean =
-  RAW === '1' || (typeof RAW === 'string' && RAW.toLowerCase() === 'true');
-
-// Minimal shape of the native module (not actually imported here)
 type LA = {
   hasHardwareAsync(): Promise<boolean>;
   supportedAuthenticationTypesAsync(): Promise<number[]>;
   isEnrolledAsync(): Promise<boolean>;
   getEnrolledLevelAsync?(): Promise<number>;
-  authenticateAsync(options?: unknown): Promise<{ success: boolean; error?: string }>;
+  authenticateAsync(options?: {
+    promptMessage?: string;
+    cancelLabel?: string;
+    requireConfirmation?: boolean;
+    disableDeviceFallback?: boolean;
+  }): Promise<{ success: boolean; error?: string }>;
 };
 
-// While the native module is removed, always return null.
-export async function getLA(): Promise<LA | null> {
-  return null;
-}
+let cachedModule: LA | null | undefined; // undefined = not attempted, null = attempted but missing
 
-// --- Helpers ---
+// --- Kill switch (default ENABLED) ---
+function readBioFlag(): string {
+  const fromProcess = ((process as any)?.env?.EXPO_PUBLIC_DISABLE_BIOMETRICS ?? '') as string;
+  const fromConfig = (((Constants as any)?.expoConfig?.extra?.EXPO_PUBLIC_DISABLE_BIOMETRICS) ?? '') as string;
+  return String(fromProcess || fromConfig || '');
+}
+const RAW = readBioFlag();
+// Disabled if explicitly '1' or 'true' (case-insensitive)
+export const BIO_DISABLED: boolean = RAW === '1' || RAW.toLowerCase?.() === 'true';
+
+// --- Safe timing helpers ---
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 async function waitActiveAndFirstFrame(): Promise<void> {
@@ -42,79 +42,77 @@ async function waitActiveAndFirstFrame(): Promise<void> {
       const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
         if (s === 'active') {
           try {
-            // RN 0.73+: remove via subscription.remove()
             (sub as unknown as { remove: () => void })?.remove?.();
-          } catch {
-            /* ignore */
-          }
+          } catch {}
           resolve();
         }
       });
     });
   }
-  await new Promise<void>((resolve) => {
-    InteractionManager.runAfterInteractions(() => resolve());
-  });
-  if (Platform.OS === 'ios') await sleep(600);
+  await new Promise<void>((resolve) => InteractionManager.runAfterInteractions(() => resolve()));
+  if (Platform.OS === 'ios') await sleep(400);
+}
+
+// --- Dynamic import (only once) ---
+export async function getLA(): Promise<LA | null> {
+  if (cachedModule !== undefined) return cachedModule;
+  try {
+    // Dynamically import only when needed; avoids crashes if the native module is not present.
+    const mod = await import('expo-local-authentication');
+    // Verify minimum shape
+    if (mod && typeof mod.hasHardwareAsync === 'function' && typeof mod.authenticateAsync === 'function') {
+      cachedModule = mod as unknown as LA;
+    } else {
+      cachedModule = null;
+    }
+  } catch {
+    cachedModule = null;
+  }
+  return cachedModule;
 }
 
 // --- API-compatible helpers (all safe fallbacks) ---
 export async function hasHardwareAsync(): Promise<boolean> {
+  if (BIO_DISABLED) return false;
   const m = await getLA();
   if (!m) return false;
-  try {
-    return await m.hasHardwareAsync();
-  } catch {
-    return false;
-  }
+  try { return await m.hasHardwareAsync(); } catch { return false; }
 }
 
 export async function supportedAuthenticationTypesAsync(): Promise<number[]> {
+  if (BIO_DISABLED) return [];
   const m = await getLA();
   if (!m) return [];
-  try {
-    return await m.supportedAuthenticationTypesAsync();
-  } catch {
-    return [];
-  }
+  try { return await m.supportedAuthenticationTypesAsync(); } catch { return []; }
 }
 
 export async function isEnrolledAsync(): Promise<boolean> {
+  if (BIO_DISABLED) return false;
   const m = await getLA();
   if (!m) return false;
-  try {
-    const fn = (m as { isEnrolledAsync?: () => Promise<boolean> }).isEnrolledAsync;
-    return typeof fn === 'function' ? !!(await fn()) : true;
-  } catch {
-    return false;
-  }
+  try { return await m.isEnrolledAsync(); } catch { return false; }
 }
 
 export async function getEnrolledLevelAsync(): Promise<number> {
+  if (BIO_DISABLED) return 0;
   const m = await getLA();
-  if (!m || typeof (m as { getEnrolledLevelAsync?: () => Promise<number> }).getEnrolledLevelAsync !== 'function') {
-    return 0;
-  }
-  try {
-    return await (m as { getEnrolledLevelAsync: () => Promise<number> }).getEnrolledLevelAsync();
-  } catch {
-    return 0;
-  }
+  if (!m || typeof m.getEnrolledLevelAsync !== 'function') return 0;
+  try { return await m.getEnrolledLevelAsync!(); } catch { return 0; }
 }
 
-export async function authenticateAsync(
-  opts?: {
-    promptMessage?: string;
-    cancelLabel?: string;
-    requireConfirmation?: boolean;
-    disableDeviceFallback?: boolean;
-  }
-): Promise<AuthResult> {
-  if (BIO_DISABLED) return { success: false };
+export async function authenticateAsync(opts?: {
+  promptMessage?: string;
+  cancelLabel?: string;
+  requireConfirmation?: boolean;
+  disableDeviceFallback?: boolean;
+}): Promise<AuthResult> {
+  if (BIO_DISABLED) return { success: false, error: 'disabled' };
+
+  // Ensure app is active & UI is ready (prevents iOS prompt timing issues)
   await waitActiveAndFirstFrame();
 
   const m = await getLA();
-  if (!m) return { success: false };
+  if (!m) return { success: false, error: 'module_missing' };
 
   const base =
     Platform.OS === 'ios'
@@ -129,8 +127,7 @@ export async function authenticateAsync(
   }
 }
 
-// Default namespace export for callers that do:
-//   import * as LocalAuthentication from '@utils/biometrics';
+// Default namespace export: allows `import * as LocalAuthentication from '@utils/biometrics'`
 const LocalAuthentication = {
   hasHardwareAsync,
   supportedAuthenticationTypesAsync,

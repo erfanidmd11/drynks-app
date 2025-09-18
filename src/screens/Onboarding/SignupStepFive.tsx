@@ -1,9 +1,23 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, Alert, TouchableOpacity } from 'react-native';
+// src/screens/Onboarding/SignupStepFive.tsx
+import React, { useEffect, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Alert,
+  TouchableOpacity,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableWithoutFeedback,
+  Keyboard,
+  ScrollView,
+} from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
+import { loadDraft, saveDraft } from '@utils/onboardingDraft';
 
 // ---- Brand colors (ONE source of truth) ----
 const DRYNKS_RED = '#E34E5C';
@@ -11,16 +25,72 @@ const DRYNKS_BLUE = '#232F39';
 const DRYNKS_GRAY = '#F1F4F7';
 const DRYNKS_WHITE = '#FFFFFF';
 
-const genderOptions = ['Male', 'Female', 'TS'];
+const genderOptions = ['Male', 'Female', 'TS'] as const;
 
 const SignupStepFive = () => {
-  // Casts keep us moving while the global nav types are finalized
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const route = useRoute<any>();
-
   const { screenname, first_name, phone } = route.params ?? {};
 
-  const [gender, setGender] = useState('');
+  const [gender, setGender] = useState<string>('');
+  const [hydrated, setHydrated] = useState(false);
+  const [me, setMe] = useState<{ id: string; email: string } | null>(null);
+
+  // ---- Hydrate from server (cross-device) then local draft (cache) ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: u } = await supabase.auth.getUser();
+        const uid = u?.user?.id || null;
+        const email = u?.user?.email || null;
+        if (uid && email) setMe({ id: uid, email });
+
+        if (uid) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('gender')
+            .eq('id', uid)
+            .maybeSingle();
+
+          if (prof?.gender) setGender(String(prof.gender));
+        }
+
+        if (!gender) {
+          const draft = await loadDraft();
+          if (draft?.gender) setGender(String(draft.gender));
+        }
+      } catch {
+        // ignore
+      } finally {
+        setHydrated(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---- Persist draft whenever selection changes ----
+  useEffect(() => {
+    if (!hydrated) return;
+    saveDraft({ gender: gender || undefined, step: 'ProfileSetupStepFive' }).catch(() => {});
+  }, [gender, hydrated]);
+
+  // ---- Handlers ----
+  const handleBack = async () => {
+    try {
+      await saveDraft({ gender: gender || undefined, step: 'ProfileSetupStepFour' });
+      if (me?.id) {
+        await supabase
+          .from('profiles')
+          .update({
+            gender: gender || null,
+            current_step: 'ProfileSetupStepFour',
+          })
+          .eq('id', me.id);
+      }
+    } catch {}
+    navigation.goBack();
+  };
 
   const handleNext = async () => {
     if (!gender) {
@@ -28,82 +98,105 @@ const SignupStepFive = () => {
       return;
     }
 
-    const { data: userData, error: userError } = await supabase.auth.getUser();
-    if (userError || !userData?.user?.id || !userData.user.email) {
-      Alert.alert('Error', 'User not authenticated.');
-      return;
+    try {
+      const { data: u, error: ue } = await supabase.auth.getUser();
+      if (ue || !u?.user?.id || !u.user.email) {
+        Alert.alert('Error', 'User not authenticated.');
+        return;
+      }
+      const uid = u.user.id;
+      const email = u.user.email;
+
+      const { error: upsertError } = await supabase.from('profiles').upsert({
+        id: uid,
+        email,
+        screenname: screenname ?? null,
+        first_name: first_name ?? null,
+        phone: phone ?? null,
+        gender,
+        current_step: 'ProfileSetupStepSix', // advance to next step
+      });
+
+      if (upsertError) {
+        console.error('[Supabase Upsert Error]', upsertError);
+        Alert.alert('Error', 'Could not save your selection.');
+        return;
+      }
+
+      await saveDraft({ gender, step: 'ProfileSetupStepSix' });
+
+      navigation.navigate('ProfileSetupStepSix' as never, {
+        screenname,
+        first_name,
+        phone,
+      } as never);
+    } catch (err) {
+      console.error('[SignupStepFive Error]', err);
+      Alert.alert('Unexpected Error', 'Something went wrong. Please try again.');
     }
-
-    const { user } = userData;
-
-    const { error: upsertError } = await supabase.from('profiles').upsert({
-      id: user.id,
-      email: user.email,
-      screenname,
-      first_name,
-      phone,
-      gender,
-      current_step: 'ProfileSetupStepFive',
-    });
-
-    if (upsertError) {
-      console.error('[Supabase Upsert Error]', upsertError);
-      Alert.alert('Error', 'Could not save your selection.');
-      return;
-    }
-
-    navigation.navigate('ProfileSetupStepSix' as never, {
-      screenname,
-      first_name,
-      phone,
-    } as never);
   };
 
+  // ---- UI ----
   return (
     <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
-      <View style={styles.container}>
-        <Text style={styles.header}>
-          {screenname ? `Hey @${screenname}, how do you identify? 🙂` : 'How do you identify? 🙂'}
-        </Text>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Math.max(0, insets.top + 64)}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <ScrollView
+            contentContainerStyle={styles.container}
+            keyboardShouldPersistTaps="handled"
+            contentInsetAdjustmentBehavior="always"
+          >
+            <Text style={styles.header}>
+              {screenname ? `Hey @${screenname}, how do you identify? 🙂` : 'How do you identify? 🙂'}
+            </Text>
 
-        <View style={styles.optionsWrapper}>
-          {genderOptions.map(option => (
-            <TouchableOpacity
-              key={option}
-              onPress={() => setGender(option)}
-              style={[
-                styles.optionButton,
-                gender === option && styles.optionButtonSelected,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.optionText,
-                  gender === option && styles.optionTextSelected,
-                ]}
-              >
-                {option}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+            <View style={styles.optionsWrapper}>
+              {genderOptions.map(option => (
+                <TouchableOpacity
+                  key={option}
+                  onPress={() => setGender(option)}
+                  style={[
+                    styles.optionButton,
+                    gender === option && styles.optionButtonSelected,
+                  ]}
+                  activeOpacity={0.9}
+                >
+                  <Text
+                    style={[
+                      styles.optionText,
+                      gender === option && styles.optionTextSelected,
+                    ]}
+                  >
+                    {option}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-        <View style={{ marginTop: 40 }}>
-          <OnboardingNavButtons
-            onNext={handleNext}
-            {...({ disabled: !gender } as any)} // cast extra prop to satisfy TS
-          />
-        </View>
-      </View>
+            <View style={{ marginTop: 40 }}>
+              <OnboardingNavButtons
+                onBack={handleBack}
+                onNext={handleNext}
+                {...({ disabled: !gender } as any)}
+              />
+            </View>
+          </ScrollView>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
     </AnimatedScreenWrapper>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
+    paddingBottom: 24,
     backgroundColor: DRYNKS_WHITE,
   },
   header: {

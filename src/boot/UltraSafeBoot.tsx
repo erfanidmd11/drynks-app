@@ -1,39 +1,45 @@
+// src/boot/UltraSafeBoot.tsx
+
 import React, { useEffect, useState } from 'react';
 import { AppState, InteractionManager, Platform } from 'react-native';
 
 const IMPORT_DELAY = Platform.OS === 'ios' ? 700 : 150;
-const ACTIVE_TIMEOUT = 2500; // safety: never wait forever
+const ACTIVE_TIMEOUT = 2500;
 const FRAME_TIMEOUT = 1000;
 
-const LazyApp = React.lazy(async () => {
-  // Defer hitting the module graph at all
-  await new Promise<void>((r) => setTimeout(r, IMPORT_DELAY));
-  const mod = await import('../navigation/AppNavigator');
-  return { default: (mod as any).default ?? mod } as { default: React.ComponentType<any> };
-});
+const LazyApp = React.lazy(() =>
+  new Promise<{ default: React.ComponentType<any> }>(async (resolve) => {
+    await new Promise((res) => setTimeout(res, IMPORT_DELAY));
+    const mod = await import('../navigation/AppNavigator');
+
+    // ✅ Use only the default export
+    resolve({ default: mod.default });
+  })
+);
 
 async function waitActiveAndFirstFrame() {
   const waitActive = new Promise<void>((resolve) => {
     if (AppState.currentState === 'active') return resolve();
-    const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') {
-        try { sub.remove(); } catch {}
+
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        try {
+          sub.remove();
+        } catch {}
         resolve();
       }
     });
   });
 
-  const waitFrame = new Promise<void>((resolve) =>
-    InteractionManager.runAfterInteractions(() => resolve())
-  );
+  const waitFrame = new Promise<void>((resolve) => {
+    InteractionManager.runAfterInteractions(() => resolve());
+  });
 
-  // Guard both waits with timeouts so UI never stalls
-  await Promise.race([waitActive, new Promise<void>((r) => setTimeout(r, ACTIVE_TIMEOUT))]);
-  await Promise.race([waitFrame, new Promise<void>((r) => setTimeout(r, FRAME_TIMEOUT))]);
+  await Promise.race([waitActive, new Promise((res) => setTimeout(res, ACTIVE_TIMEOUT))]);
+  await Promise.race([waitFrame, new Promise((res) => setTimeout(res, FRAME_TIMEOUT))]);
 
   if (Platform.OS === 'ios') {
-    // Let navigation settle a touch more on iOS
-    await new Promise<void>((r) => setTimeout(r, 120));
+    await new Promise((res) => setTimeout(res, 120));
   }
 }
 
@@ -42,11 +48,17 @@ export default function UltraSafeBoot() {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+
+    const initialize = async () => {
       await waitActiveAndFirstFrame();
       if (!cancelled) setReady(true);
-    })();
-    return () => { cancelled = true; };
+    };
+
+    void initialize();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!ready) return null;

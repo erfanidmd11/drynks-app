@@ -1,7 +1,7 @@
 {
-  "cli": { 
-    "version": ">= 3.0.0", 
-    "appVersionSource": "local" 
+  "cli": {
+    "version": ">= 3.0.0",
+    "appVersionSource": "local"
   },
 
   "build": {
@@ -19,6 +19,7 @@
       "developmentClient": false,
       "distribution": "internal",
       "channel": "staging",
+      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "1"
@@ -29,6 +30,7 @@
       "developmentClient": false,
       "distribution": "store",
       "channel": "production",
+      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "1"

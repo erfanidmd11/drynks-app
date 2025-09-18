@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+// src/screens/Onboarding/SignupStepFour.tsx
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,11 +15,14 @@ import {
   FlatList,
   Pressable,
   ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '@config/supabase';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
+import { loadDraft, saveDraft } from '@utils/onboardingDraft';
 
 // ---- Brand colors (ONE source of truth) ----
 const DRYNKS_RED = '#E34E5C';
@@ -38,92 +42,224 @@ const countryCodes = [
   { label: '+34 (Spain)', value: '+34' },
 ];
 
+// E.164: + and 7..15 digits total
+const isE164 = (s: string) => /^\+[0-9]{7,15}$/.test(s);
+
+function useDebounced<T extends any[]>(fn: (...args: T) => void, delay = 350) {
+  const t = useRef<NodeJS.Timeout | null>(null);
+  return useCallback((...args: T) => {
+    if (t.current) clearTimeout(t.current);
+    t.current = setTimeout(() => fn(...args), delay);
+  }, [fn, delay]);
+}
+
 const SignupStepFour = () => {
-  // Cast to avoid fighting global nav typing while we finish the root map
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const route = useRoute<any>();
   const { screenname, first_name } = route.params ?? {};
 
   const [countryCode, setCountryCode] = useState('+1');
   const [phone, setPhone] = useState('');
   const [phoneAvailable, setPhoneAvailable] = useState<boolean | null>(null);
+  const [formatValid, setFormatValid] = useState<boolean | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [loadingNext, setLoadingNext] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [me, setMe] = useState<{ id: string; email: string } | null>(null);
+
+  // Full E.164 candidate
+  const fullPhone = useMemo(() => {
+    const digits = phone.replace(/[^0-9]/g, '');
+    // Remove '+' from countryCode if any (it already includes '+'), then concat and ensure one '+'
+    const cc = countryCode.startsWith('+') ? countryCode : `+${countryCode}`;
+    return `${cc}${digits}`;
+  }, [countryCode, phone]);
+
+  // ---------- Hydrate from server first, then local draft ----------
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: u } = await supabase.auth.getUser();
+        const uid = u?.user?.id || null;
+        const email = u?.user?.email || null;
+        if (uid && email) setMe({ id: uid, email });
+
+        if (uid) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('phone')
+            .eq('id', uid)
+            .maybeSingle();
+          if (prof?.phone) {
+            // Try to split into code + local digits; if impossible, drop into E.164 baseline
+            const match = String(prof.phone).match(/^\+([0-9]{1,3})([0-9]{6,})$/);
+            if (match) {
+              setCountryCode(`+${match[1]}`);
+              setPhone(match[2]);
+            } else {
+              // default to +1 and keep digits if any
+              setCountryCode('+1');
+              setPhone(String(prof.phone).replace(/[^0-9]/g, ''));
+            }
+          }
+        }
+
+        // Merge local draft if present (doesn't override server if server had data)
+        const draft = await loadDraft();
+        if (draft?.phone && !phone) {
+          // draft.phone expected E.164; attempt split
+          const m = String(draft.phone).match(/^\+([0-9]{1,3})([0-9]{6,})$/);
+          if (m) {
+            setCountryCode(`+${m[1]}`);
+            setPhone(m[2]);
+          }
+        }
+      } catch {
+        // ignore
+      } finally {
+        setHydrated(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------- Persist draft on change ----------
+  useEffect(() => {
+    if (!hydrated) return;
+    // Save E.164 only if format is valid; otherwise save partial for resume
+    const toSave = isE164(fullPhone) ? fullPhone : undefined;
+    saveDraft({ phone: toSave, step: 'ProfileSetupStepFour' }).catch(() => {});
+  }, [fullPhone, hydrated]);
+
+  // ---------- Availability + format check (debounced) ----------
+  const checkPhoneAvailability = useCallback(
+    async (candidate: string) => {
+      // Format check first
+      const valid = isE164(candidate);
+      setFormatValid(valid);
+
+      if (!valid) {
+        setPhoneAvailable(null);
+        return;
+      }
+
+      try {
+        setChecking(true);
+        const { data: u } = await supabase.auth.getUser();
+        const uid = u?.user?.id || null;
+        if (!uid) {
+          setPhoneAvailable(null);
+          return;
+        }
+
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('phone', candidate);
+
+        if (error) {
+          console.warn('[Phone Check Error]', error.message);
+          setPhoneAvailable(null);
+          return;
+        }
+
+        const takenByOther = (data?.length ?? 0) > 0 && (data ?? [])[0].id !== uid;
+        setPhoneAvailable(!takenByOther);
+      } catch (e) {
+        console.warn('[Phone Check Error]', e);
+        setPhoneAvailable(null);
+      } finally {
+        setChecking(false);
+      }
+    },
+    []
+  );
+
+  const debouncedCheck = useDebounced((candidate: string) => {
+    checkPhoneAvailability(candidate);
+  }, 350);
 
   useEffect(() => {
-    if (phone.length >= 7) checkPhoneAvailability();
-    else setPhoneAvailable(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phone, countryCode]);
-
-  const checkPhoneAvailability = async () => {
-    const fullPhone = `${countryCode}${phone}`;
-    try {
-      setChecking(true);
-      const { data: userData, error: authError } = await supabase.auth.getUser();
-      if (authError || !userData?.user?.id) {
-        setPhoneAvailable(null);
-        return;
-      }
-      const userId = userData.user.id;
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('phone', fullPhone);
-
-      if (error) {
-        console.error('[Phone Check Error]', error);
-        setPhoneAvailable(null);
-        return;
-      }
-
-      const isTakenBySomeoneElse = (data?.length ?? 0) > 0 && data![0].id !== userId;
-      setPhoneAvailable(!isTakenBySomeoneElse);
-    } catch (e) {
-      console.error('[Phone Check Error]', e);
+    // Only kick off checks when there are at least ~7 local digits to avoid noise
+    if (phone.replace(/[^0-9]/g, '').length >= 7) {
+      debouncedCheck(fullPhone);
+    } else {
+      setFormatValid(null);
       setPhoneAvailable(null);
-    } finally {
-      setChecking(false);
     }
+  }, [phone, countryCode, fullPhone, debouncedCheck]);
+
+  // ---------- Handlers ----------
+  const handleBack = async () => {
+    try {
+      const draftPhone = isE164(fullPhone) ? fullPhone : undefined;
+      await saveDraft({ phone: draftPhone, step: 'ProfileSetupStepThree' });
+
+      if (me?.id) {
+        await supabase
+          .from('profiles')
+          .update({
+            phone: draftPhone ?? null,
+            current_step: 'ProfileSetupStepThree',
+          })
+          .eq('id', me.id);
+      }
+    } catch {}
+    navigation.goBack();
   };
 
   const handleNext = async () => {
-    const fullPhone = `${countryCode}${phone}`;
-    if (!phone || !screenname || !first_name) {
-      Alert.alert('Missing Info', 'All fields are required.');
+    const valid = isE164(fullPhone);
+    if (!valid) {
+      Alert.alert(
+        'Check your number',
+        'Please enter a valid phone number (digits only) with the correct country code.'
+      );
+      return;
+    }
+    if (phoneAvailable === false) {
+      Alert.alert(
+        'Phone number already in use',
+        'That phone number is already linked to another account.',
+        [
+          { text: 'Change number', style: 'cancel' },
+          { text: 'Go to Login', onPress: () => navigation.navigate('Login' as never) },
+        ]
+      );
       return;
     }
 
     try {
-      setLoading(true);
-      const { data: userData, error: userError } = await supabase.auth.getUser();
-      if (userError || !userData?.user?.id || !userData.user.email) {
+      setLoadingNext(true);
+
+      const { data: u, error: ue } = await supabase.auth.getUser();
+      if (ue || !u?.user?.id || !u.user.email) {
         Alert.alert('Error', 'User authentication failed.');
         return;
       }
+      const uid = u.user.id;
+      const email = u.user.email;
 
-      const user = userData.user;
-
-      const { data: existing, error: checkError } = await supabase
+      // Final server-side guard against race (unique index will also protect)
+      const { data: existing, error: checkErr } = await supabase
         .from('profiles')
         .select('id')
         .eq('phone', fullPhone);
 
-      if (checkError) {
-        console.error('[Phone Check Error]', checkError);
+      if (checkErr) {
         Alert.alert('Error', 'Could not validate phone number.');
         return;
       }
 
-      const isTakenBySomeoneElse = (existing?.length ?? 0) > 0 && existing![0].id !== user.id;
-
-      if (isTakenBySomeoneElse) {
+      const takenByOther = (existing?.length ?? 0) > 0 && (existing ?? [])[0].id !== uid;
+      if (takenByOther) {
         Alert.alert(
-          'Phone Number Already In Use',
+          'Phone number already in use',
           'That phone number is already linked to another account.',
           [
-            { text: 'Change Number', style: 'cancel' },
+            { text: 'Change number', style: 'cancel' },
             { text: 'Go to Login', onPress: () => navigation.navigate('Login' as never) },
           ]
         );
@@ -131,25 +267,22 @@ const SignupStepFour = () => {
       }
 
       const { error: upsertError } = await supabase.from('profiles').upsert({
-        id: user.id,
-        email: user.email,
-        screenname,
-        first_name,
+        id: uid,
+        email,
+        screenname: screenname ?? null,
+        first_name: first_name ?? null,
         phone: fullPhone,
-        current_step: 'ProfileSetupStepFour',
+        current_step: 'ProfileSetupStepFive',
       });
 
       if (upsertError) {
-        console.error('[Supabase Upsert Error]', upsertError);
-        if (
-          upsertError.message?.toLowerCase().includes('duplicate') ||
-          upsertError.message?.toLowerCase().includes('phone')
-        ) {
+        const msg = upsertError.message?.toLowerCase() || '';
+        if (msg.includes('duplicate') || msg.includes('unique') || msg.includes('phone')) {
           Alert.alert(
-            'Phone Number Already In Use',
+            'Phone number already in use',
             'That phone number is already linked to another account.',
             [
-              { text: 'Change Number', style: 'cancel' },
+              { text: 'Change number', style: 'cancel' },
               { text: 'Go to Login', onPress: () => navigation.navigate('Login' as never) },
             ]
           );
@@ -159,47 +292,31 @@ const SignupStepFour = () => {
         return;
       }
 
+      // Keep draft aligned (optional cache)
+      await saveDraft({ phone: fullPhone, step: 'ProfileSetupStepFive' });
+
       navigation.navigate('ProfileSetupStepFive' as never, {
         screenname,
         first_name,
         phone: fullPhone,
       } as never);
     } catch (err) {
-      console.error('[Unexpected Error]', err);
+      console.error('[SignupStepFour Next Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong.');
     } finally {
-      setLoading(false);
+      setLoadingNext(false);
     }
   };
 
-  const renderCountryModal = () => (
-    <Modal
-      visible={modalVisible}
-      transparent
-      animationType="slide"
-      onRequestClose={() => setModalVisible(false)}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <FlatList
-            data={countryCodes}
-            keyExtractor={(item) => item.value}
-            renderItem={({ item }) => (
-              <Pressable
-                onPress={() => {
-                  setCountryCode(item.value);
-                  setModalVisible(false);
-                }}
-                style={styles.countryItem}
-              >
-                <Text style={styles.countryText}>{item.label}</Text>
-              </Pressable>
-            )}
-          />
-        </View>
-      </View>
-    </Modal>
-  );
+  // ---------- UI ----------
+  const status = useMemo(() => {
+    if (checking) return '⏳';
+    if (formatValid === null) return '';
+    if (formatValid === false) return '❌';
+    if (phoneAvailable === false) return '❌';
+    if (formatValid && phoneAvailable) return '✅';
+    return '';
+  }, [checking, formatValid, phoneAvailable]);
 
   return (
     <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
@@ -207,9 +324,14 @@ const SignupStepFour = () => {
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Math.max(0, insets.top + 64)}
         >
           <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={styles.container}>
+            <ScrollView
+              contentContainerStyle={styles.container}
+              keyboardShouldPersistTaps="handled"
+              contentInsetAdjustmentBehavior="always"
+            >
               <Text style={styles.header}>
                 {first_name ? `Hey ${first_name}, what's your number? 📱` : 'How Can We Reach You? 📱'}
               </Text>
@@ -227,27 +349,54 @@ const SignupStepFour = () => {
                     placeholder="Phone Number"
                     keyboardType="phone-pad"
                     value={phone}
-                    onChangeText={(text) => setPhone(text.replace(/[^0-9]/g, ''))}
+                    onChangeText={(text) => {
+                      const digits = text.replace(/[^0-9]/g, '');
+                      setPhone(digits);
+                    }}
                     placeholderTextColor="#8A94A6"
+                    returnKeyType="done"
                   />
                   {phone.length >= 7 && (
-                    <Text style={styles.statusIcon}>
-                      {checking ? '⏳' : phoneAvailable === true ? '✅' : phoneAvailable === false ? '❌' : ''}
-                    </Text>
+                    <Text style={styles.statusIcon}>{status}</Text>
                   )}
                 </View>
               </View>
 
-              <View style={{ marginTop: 20 }}>
-                <OnboardingNavButtons
-                  onNext={handleNext}
-                  {...({ disabled: loading || phoneAvailable === false } as any)}
-                />
-                {loading && <ActivityIndicator size="large" style={{ marginTop: 20 }} />}
-              </View>
+              <OnboardingNavButtons
+                onBack={handleBack}
+                onNext={handleNext}
+                {...({ disabled: loadingNext || formatValid === false || phoneAvailable === false } as any)}
+              />
+              {loadingNext && <ActivityIndicator size="large" style={{ marginTop: 16 }} />}
 
-              {renderCountryModal()}
-            </View>
+              {/* Country picker modal */}
+              <Modal
+                visible={modalVisible}
+                transparent
+                animationType="slide"
+                onRequestClose={() => setModalVisible(false)}
+              >
+                <View style={styles.modalOverlay}>
+                  <View style={styles.modalContent}>
+                    <FlatList
+                      data={countryCodes}
+                      keyExtractor={(item) => item.value}
+                      renderItem={({ item }) => (
+                        <Pressable
+                          onPress={() => {
+                            setCountryCode(item.value);
+                            setModalVisible(false);
+                          }}
+                          style={styles.countryItem}
+                        >
+                          <Text style={styles.countryText}>{item.label}</Text>
+                        </Pressable>
+                      )}
+                    />
+                  </View>
+                </View>
+              </Modal>
+            </ScrollView>
           </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -257,9 +406,10 @@ const SignupStepFour = () => {
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
+    paddingBottom: 24,
     backgroundColor: DRYNKS_WHITE,
   },
   header: {
@@ -279,9 +429,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 15,
+    gap: 10,
   },
   codeSelector: {
-    width: 100,
+    width: 110,
     height: 50,
     borderColor: '#DADFE6',
     borderWidth: 1,

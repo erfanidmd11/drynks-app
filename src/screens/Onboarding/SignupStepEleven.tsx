@@ -1,17 +1,19 @@
 // src/screens/Auth/SignupStepEleven.tsx
-// Final step: saves orientation, marks profile complete, arms Quick Unlock, clears onboarding state, and routes to App.
+// src/screens/Onboarding/SignupStepEleven.tsx
+// Step 11 — Terms (finalize): hydrate, draft cache, accept terms, mark complete, quick unlock, route to App.
 
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
   Alert, KeyboardAvoidingView, Platform,
   ScrollView, TouchableWithoutFeedback, Keyboard, ActivityIndicator,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
 import { supabase } from '@config/supabase';
+import { loadDraft, saveDraft, clearDraft } from '@utils/onboardingDraft';
 
 import {
   enableQuickUnlock,       // stores refresh token securely
@@ -21,129 +23,192 @@ import {
 const DRYNKS_RED = '#E34E5C';
 const DRYNKS_BLUE = '#232F39';
 const DRYNKS_WHITE = '#FFFFFF';
+const DRYNKS_GRAY = '#F1F4F7';
 
-const orientations = ['Straight', 'Gay/Lesbian', 'Bisexual', 'Pansexual', 'Everyone'] as const;
+// You can bump this to invalidate old consent text later
+const TERMS_VERSION = 'v1';
 
 type RouteParams = {
-  userId?: string;
   screenname?: string | null;
+  first_name?: string | null;
+  phone?: string | null;
 };
 
 const SignupStepEleven: React.FC = () => {
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const route = useRoute<any>();
-  const { userId, screenname } = (route?.params || {}) as RouteParams;
+  const { screenname } = (route?.params || {}) as RouteParams;
 
-  const [selected, setSelected] = useState<typeof orientations[number] | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [me, setMe] = useState<{ id: string; email: string } | null>(null);
   const pressedRef = useRef(false);
 
-  const handleNext = async () => {
+  // -------- Hydrate from server, then draft --------
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: u } = await supabase.auth.getUser();
+        const uid = u?.user?.id || null;
+        const email = u?.user?.email || null;
+        if (uid && email) setMe({ id: uid, email });
+
+        if (uid) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('agreed_to_terms, accepted_terms_at, accepted_terms_version')
+            .eq('id', uid)
+            .maybeSingle();
+
+          if (prof?.agreed_to_terms) setAccepted(true);
+        }
+
+        if (!accepted) {
+          const draft = await loadDraft();
+          if (typeof draft?.agreed_to_terms === 'boolean') setAccepted(draft.agreed_to_terms as boolean);
+        }
+      } catch {
+        // ignore, user can still toggle
+      } finally {
+        setHydrated(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // -------- Persist draft on change --------
+  useEffect(() => {
+    if (!hydrated) return;
+    saveDraft({ agreed_to_terms: accepted, step: 'ProfileSetupStepEleven' }).catch(() => {});
+  }, [accepted, hydrated]);
+
+  // -------- Handlers --------
+  const handleBack = async () => {
+    try {
+      await saveDraft({ agreed_to_terms: accepted, step: 'ProfileSetupStepTen' });
+      if (me?.id) {
+        await supabase
+          .from('profiles')
+          .update({
+            agreed_to_terms: accepted,
+            current_step: 'ProfileSetupStepTen', // back to Photos
+          })
+          .eq('id', me.id);
+      }
+    } catch {}
+    navigation.goBack();
+  };
+
+  const handleFinish = async () => {
     if (pressedRef.current) return;
     pressedRef.current = true;
 
     try {
-      if (!selected) {
-        Alert.alert('Missing Selection', 'Select your sexual orientation to continue.');
-        return;
-      }
-      if (!userId) {
-        Alert.alert('Session Error', 'Missing user. Please log in again.');
+      if (!accepted) {
+        Alert.alert('Almost there!', 'Please accept the Terms of Use and Privacy Policy to continue.');
         return;
       }
 
-      setSubmitting(true);
+      setSaving(true);
 
-      // 1) Save orientation + mark profile complete (keep both flags for backward compatibility)
+      const { data: u, error: ue } = await supabase.auth.getUser();
+      if (ue || !u?.user?.id || !u.user.email) {
+        Alert.alert('Session Error', 'Please log in again.');
+        return;
+      }
+      const uid = u.user.id;
+
+      // 1) Save terms + mark complete
       const { error: upErr } = await supabase
         .from('profiles')
         .update({
-          orientation: selected,
+          agreed_to_terms: true,
+          accepted_terms_at: new Date().toISOString(),
+          accepted_terms_version: TERMS_VERSION,
           onboarding_complete: true,
-          has_completed_profile: true, // <-- Keep this consistent with the rest of the app
+          has_completed_profile: true,
+          current_step: 'Complete',
         })
-        .eq('id', userId);
+        .eq('id', uid);
 
-      if (upErr) {
-        throw new Error(upErr.message || 'Could not save orientation.');
-      }
+      if (upErr) throw new Error(upErr.message || 'Could not save terms.');
 
-      // 2) Try to arm Quick Unlock right away (if the device supports it and a session exists)
+      // 2) Optional: arm Quick Unlock
       try {
         const supported = await deviceSupportsBiometrics();
         if (supported) {
           const { data: s } = await supabase.auth.getSession();
           const refreshToken = s?.session?.refresh_token;
-          if (refreshToken) {
-            await enableQuickUnlock(refreshToken);
-          }
+          if (refreshToken) await enableQuickUnlock(refreshToken);
         }
       } catch (e) {
-        // Non-fatal; user can still continue
-        console.warn('[SignupStepEleven] enableQuickUnlock failed:', e);
+        // Non-fatal
+        console.warn('[Step11] enableQuickUnlock failed:', e);
       }
 
-      // 3) Clear local onboarding scratch state (ignore errors)
+      // 3) Clear local onboarding scratch
       try {
-        await AsyncStorage.multiRemove(['onboarding:wip_step', 'onboarding:wip_payload']);
+        await clearDraft();
       } catch (e) {
-        console.warn('[SignupStepEleven] clear onboarding state failed:', e);
+        console.warn('[Step11] clearDraft failed:', e);
       }
 
-      // 4) Reset to the app shell so header/footer tabs appear
-      navigation.reset({
-        index: 0,
-        routes: [{ name: 'App' }],
-      });
+      // 4) Route to the main app
+      navigation.reset({ index: 0, routes: [{ name: 'App' }] });
     } catch (err: any) {
       console.error('[SignupStepEleven] submit error', err);
       Alert.alert('Error', err?.message || 'Could not finish signup.');
     } finally {
-      setSubmitting(false);
+      setSaving(false);
       pressedRef.current = false;
     }
   };
 
+  // -------- UI --------
   return (
-    <AnimatedScreenWrapper>
+    <AnimatedScreenWrapper {...({ style: { backgroundColor: DRYNKS_WHITE } } as any)}>
       <KeyboardAvoidingView
-        style={styles.scrollContainer}
+        style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Math.max(0, insets.top + 64)}
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <ScrollView contentContainerStyle={styles.inner} keyboardShouldPersistTaps="handled">
             <Text style={styles.header}>
-              {screenname ? `Last Step, @${screenname}! 🌈` : 'Last Step! 🌈'}
+              {screenname ? `The Fine Print, @${screenname} 📜` : 'The Fine Print 📜'}
             </Text>
-            <Text style={styles.subtext}>Who are you into? Pick your orientation:</Text>
+            <Text style={styles.subtext}>
+              By using DrYnks, you agree to our Terms of Use and Privacy Policy. It helps keep the vibe safe,
+              respectful, and spam-free.
+            </Text>
 
-            {orientations.map(opt => (
-              <TouchableOpacity
-                key={opt}
-                style={[styles.option, selected === opt && styles.selectedOption]}
-                onPress={() => setSelected(opt)}
-                disabled={submitting}
-              >
-                <Text style={[styles.optionText, selected === opt && styles.selectedText]}>
-                  {opt}
-                </Text>
-              </TouchableOpacity>
-            ))}
-
-            <View style={{ marginTop: 20 }}>
-              <OnboardingNavButtons
-                onNext={handleNext}
-                {...({
-                  nextLabel: submitting ? 'Saving…' : 'Finish',
-                  disabled: submitting || !selected,
-                } as any)} // ✅ cast extra props to satisfy TS without changing component code
-              />
-              {submitting && (
-                <View style={{ marginTop: 10, alignItems: 'center' }}>
-                  <ActivityIndicator />
-                </View>
-              )}
+            <View style={styles.termsBox}>
+              <Text style={styles.termsText}>
+                • You must be 18+ to use DrYnks.{'\n'}
+                • Respect all users — no harassment or hate speech.{'\n'}
+                • No spamming or fake profiles.{'\n'}
+                • We value your privacy. We don’t sell your data.
+              </Text>
             </View>
+
+            <TouchableOpacity onPress={() => setAccepted(!accepted)} style={styles.acceptRow} activeOpacity={0.9}>
+              <Text style={styles.checkbox}>{accepted ? '☑' : '☐'}</Text>
+              <Text style={styles.acceptText}>I agree to the Terms of Use and Privacy Policy</Text>
+            </TouchableOpacity>
+
+            <OnboardingNavButtons
+              onBack={handleBack}
+              onNext={handleFinish}
+              {...({ nextLabel: saving ? 'Saving…' : 'Finish', disabled: saving || !accepted } as any)}
+            />
+
+            {saving && (
+              <View style={{ marginTop: 10, alignItems: 'center' }}>
+                <ActivityIndicator />
+              </View>
+            )}
           </ScrollView>
         </TouchableWithoutFeedback>
       </KeyboardAvoidingView>
@@ -152,48 +217,54 @@ const SignupStepEleven: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  scrollContainer: {
-    flexGrow: 1,
-  },
   inner: {
     paddingHorizontal: 20,
     paddingBottom: 40,
-    backgroundColor: '#fff',
+    backgroundColor: DRYNKS_WHITE,
     flexGrow: 1,
     justifyContent: 'center',
   },
   header: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     marginBottom: 10,
     textAlign: 'center',
     color: DRYNKS_BLUE,
   },
   subtext: {
     fontSize: 14,
-    color: '#555',
+    color: '#55606B',
     textAlign: 'center',
+    marginBottom: 16,
+  },
+  termsBox: {
+    maxHeight: 200,
     marginBottom: 20,
+    padding: 12,
+    borderColor: '#DADFE6',
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: DRYNKS_GRAY,
   },
-  option: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 24,
-    backgroundColor: '#e0e0e0',
-    marginVertical: 8,
-    width: '100%',
+  termsText: {
+    fontSize: 14,
+    color: '#23303A',
+    lineHeight: 20,
+  },
+  acceptRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    marginBottom: 18,
+    justifyContent: 'center',
   },
-  selectedOption: {
-    backgroundColor: DRYNKS_RED,
+  checkbox: {
+    fontSize: 20,
+    marginRight: 10,
+    color: DRYNKS_BLUE,
   },
-  optionText: {
-    fontSize: 16,
-    color: '#333',
-  },
-  selectedText: {
-    color: '#fff',
-    fontWeight: 'bold',
+  acceptText: {
+    fontSize: 14,
+    color: '#23303A',
   },
 });
 

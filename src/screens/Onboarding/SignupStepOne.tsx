@@ -1,7 +1,11 @@
 // src/screens/Onboarding/SignupStepOne.tsx
 // Step 1 — Email + Password (brand styled, production safe)
+// - Strong validation and clear UX for common errors
+// - Persists draft locally so OTP screen can prefill
+// - Attempts to create a minimal profile row if a session already exists
+//   (use the same ensureProfileRow() after OTP success too)
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -20,6 +24,9 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import { saveCredentials } from '@utils/secureStore';
+import { loadDraft, saveDraft } from '@utils/onboardingDraft';
+// Optional but recommended: handles stale/invalid refresh tokens gracefully
+import { resetAuthLocal } from '@utils/resetAuth';
 
 // ---- Brand colors (declare ONCE) ----
 const DRYNKS_RED = '#E34E5C';
@@ -29,6 +36,7 @@ const DRYNKS_WHITE = '#FFFFFF';
 
 type Nav = ReturnType<typeof useNavigation>;
 
+// ---------- Helpers ----------
 function validatePassword(pw: string) {
   return {
     length: pw.length >= 9,
@@ -37,8 +45,67 @@ function validatePassword(pw: string) {
     special: /[^A-Za-z0-9]/.test(pw),
   };
 }
-const isEmailValid = (email: string) =>
-  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+const isEmailValid = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+/**
+ * Generate a deterministic fallback screenname from email + uid.
+ * This guarantees we satisfy NOT NULL on profiles.screenname even
+ * before the user customizes it in later steps.
+ */
+function genScreenname(email?: string | null, uid?: string) {
+  const base = (email?.split('@')[0] || 'user')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '');
+  const suffix = (uid || Math.random().toString(36)).replace(/-/g, '').slice(0, 6);
+  return `${base}_${suffix}`;
+}
+
+/**
+ * Try to ensure a minimal profiles row exists for the current session's user.
+ * This is safe/idempotent and respects RLS (requires a logged-in session).
+ *
+ * Call this here (if a session already exists) and again immediately after OTP verification.
+ */
+async function ensureProfileRow() {
+  try {
+    const { data: sess } = await supabase.auth.getSession();
+    const session = sess?.session;
+    if (!session) return; // No session yet (likely email confirmation required)
+
+    const { user } = session;
+    const { data: existing, error: selErr } = await supabase
+      .from('profiles')
+      .select('id, screenname')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (selErr) {
+      // Permission errors or transient issues—don’t block signup flow.
+      console.log('[SignupStepOne] ensureProfileRow select error:', selErr);
+      return;
+    }
+    if (existing) return; // Row already there—nothing to do.
+
+    const fallback = genScreenname(user.email, user.id);
+
+    const { error: insErr } = await supabase.from('profiles').insert({
+      id: user.id,
+      screenname: fallback,
+      first_name: fallback, // temporary; user can change later
+      email: user.email,
+      agreed_to_terms: false,
+      has_completed_profile: false,
+      onboarding_complete: false,
+    });
+
+    if (insErr) {
+      // Ignore duplicate insert or permission errors; the later steps will try again.
+      console.log('[SignupStepOne] ensureProfileRow insert error:', insErr);
+    }
+  } catch (e) {
+    console.log('[SignupStepOne] ensureProfileRow generic error:', e);
+  }
+}
 
 const SignupStepOne: React.FC = () => {
   const navigation: Nav = useNavigation();
@@ -46,6 +113,22 @@ const SignupStepOne: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // Hydrate any local draft on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const draft = await loadDraft();
+        if (draft?.email) setEmail(draft.email);
+        if (draft?.password) setPassword(draft.password);
+      } catch {}
+    })();
+  }, []);
+
+  // Persist draft when fields change (fire-and-forget)
+  useEffect(() => {
+    saveDraft({ email, password, step: 'EnterOtpScreen' }).catch(() => {});
+  }, [email, password]);
 
   const checks = useMemo(() => validatePassword(password), [password]);
   const passwordValid = Object.values(checks).every(Boolean);
@@ -64,42 +147,57 @@ const SignupStepOne: React.FC = () => {
     try {
       setLoading(true);
 
-      // Supabase sign-up
+      // Clear any stale local session (prevents "Invalid Refresh Token" noise on dev devices)
+      await resetAuthLocal().catch(() => {});
+
+      // Sign up (email confirmation may be required depending on your Supabase project settings)
       const { data, error } = await supabase.auth.signUp({
         email: email.trim(),
         password,
-        // (Optional) add profile seed via "data" if you want
-        // options: { data: { source: 'app' } }
+        // If you deep-link confirmation emails back to the app, set this:
+        // options: { emailRedirectTo: 'dr-ynks://auth-callback' },
       });
 
       if (error) {
+        const msg = (error.message || '').toLowerCase();
+        if (msg.includes('registered') || msg.includes('exists') || msg.includes('already')) {
+          Alert.alert(
+            'Email already in use',
+            'This email is already registered. Log in or use a different email.',
+            [
+              { text: 'Use a different email' },
+              {
+                text: 'Log in',
+                onPress: () => {
+                  // @ts-ignore
+                  navigation.navigate('Login');
+                },
+              },
+            ]
+          );
+          return;
+        }
+        if (msg.includes('password')) {
+          Alert.alert('Weak password', 'Please choose a stronger password and try again.');
+          return;
+        }
         Alert.alert('Signup error', error.message);
         return;
       }
 
-      const user = data?.user;
-      if (user?.id) {
-        // Safe upsert of profile row so Step 2 has an id to work with
-        await supabase
-          .from('profiles')
-          .upsert({
-            id: user.id,
-            email: user.email,
-            current_step: 'ProfileSetupStepOne',
-            created_at: new Date().toISOString(),
-          })
-          .then(({ error: upsertErr }) => {
-            if (upsertErr) console.warn('[profiles upsert]', upsertErr.message);
-          });
-      }
+      // Try to create the minimal profile row if we already have a session.
+      // If email confirmation is required, there will be no session yet—this is fine.
+      await ensureProfileRow();
 
+      // Save draft + creds so OTP screen can prefill & user can resume on this device
+      await saveDraft({ email: email.trim(), password, step: 'EnterOtpScreen' });
       await saveCredentials(email.trim(), password);
 
-      // Pass creds to OTP screen (your flow expects it)
-      // @ts-ignore – keep params flexible for now
-      navigation.navigate('EnterOtpScreen', { email: email.trim(), password });
+      // Navigate to OTP entry (user is NOT authenticated yet if email confirmation is on)
+      // @ts-ignore – params are flexible
+      navigation.navigate('EnterOtpScreen', { email: email.trim() });
     } catch (e: any) {
-      console.error('[Signup Error]', e);
+      console.error('[SignupStepOne] Unexpected error:', e);
       Alert.alert('Unexpected error', 'Please try again.');
     } finally {
       setLoading(false);

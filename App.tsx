@@ -1,18 +1,18 @@
-// App.tsx — Safe-mode for iOS 18: guard bad event emitters + no push listeners in prod
+// App.tsx — Production-ready with iOS18 safety + push enabled (lazy + safe)
 
-// ⚠️ Must be FIRST: install iOS 18 crash guard BEFORE any other imports (even polyfills)
+// ------------- iOS18 crash guard must be first -------------
 import './src/boot/SafeEmitterShim';
 import { unlockEmitters } from './src/boot/SafeEmitterShim';
 
-// ---- polyfills MUST be before anything that might touch networking/crypto (e.g., supabase) ----
+// ------------- polyfills (before anything that touches net/crypto) -------------
 import 'react-native-url-polyfill/auto';
 import 'react-native-get-random-values';
+import './src/boot/polyfills';
 import { decode as atobPolyfill, encode as btoaPolyfill } from 'base-64';
 // @ts-ignore
 if (typeof global.atob === 'undefined') global.atob = atobPolyfill;
 // @ts-ignore
 if (typeof global.btoa === 'undefined') global.btoa = btoaPolyfill;
-// ---------------------------------------------------------------------------------------------
 
 import React, { useEffect, useRef } from 'react';
 import {
@@ -31,18 +31,20 @@ import AppBootGate from './src/boot/AppBootGate';
 import GlobalErrorBoundary from './src/boot/GlobalErrorBoundary';
 import UltraSafeBoot from './src/boot/UltraSafeBoot';
 import { supabase } from '@config/supabase';
+import { initInviteDeepLinking } from '@services/InviteLinks'; // capture /invite/<code> + ?code= links
 
-// Optional: quiet some noisy warnings
 LogBox.ignoreLogs(['Setting a timer']);
 
-// ========= Runtime/env flags =========
+/* -------------------- env flags -------------------- */
 const RAW_PUSH_FLAG =
   (process?.env?.EXPO_PUBLIC_DISABLE_PUSH ??
     (Constants?.expoConfig as any)?.extra?.EXPO_PUBLIC_DISABLE_PUSH ??
     '0') as string;
-const ENV_PUSH_DISABLED =
+const PUSH_DISABLED =
   RAW_PUSH_FLAG === '1' || RAW_PUSH_FLAG.toLowerCase?.() === 'true';
-const PUSH_ALLOWED = __DEV__ && !ENV_PUSH_DISABLED;
+
+// Push is **allowed** in production when not explicitly disabled
+const PUSH_ALLOWED = !PUSH_DISABLED;
 
 const RAW_SAFE_BOOT =
   (process?.env?.EXPO_PUBLIC_SAFE_BOOT ??
@@ -50,13 +52,12 @@ const RAW_SAFE_BOOT =
     '1') as string;
 const SAFE_BOOT =
   RAW_SAFE_BOOT === '1' || RAW_SAFE_BOOT.toLowerCase?.() === 'true';
-// =====================================
 
-// If you have a RootNavigation helper with a navigation ref, we’ll use it for breadcrumbs.
-let getCurrentRouteSafe: (() => { name?: string } | undefined) | null = null;
+/* -------------------- navigation helpers -------------------- */
+let getCurrentRouteSafe:
+  | (() => { name?: string } | undefined)
+  | null = null;
 try {
-  // Typical pattern: export { navigationRef, navigate, getCurrentRoute } from RootNavigation
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const RootNav = require('@navigation/RootNavigation');
   if (typeof RootNav?.getCurrentRoute === 'function') {
     getCurrentRouteSafe = () => {
@@ -68,54 +69,46 @@ try {
     };
   }
 } catch {
-  // Fallback: if RootNavigation isn’t available, breadcrumbs will be a no-op.
+  /* ignore */
 }
 
-/** Deep-link navigation router from push payloads (kept for dev) */
 function handleTapNavigation(data: any) {
   if (!data) return;
   try {
-    // Lazy import to avoid circular deps at boot
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { navigate } = require('@navigation/RootNavigation');
     const t = data?.type as string | undefined;
+
     if (!t) {
-      if (data?.date_id)
-        navigate('DateFeed', {
-          scrollToDateId: data.date_id,
-          origin: 'Profile',
-        } as any);
+      if (data?.date_id) {
+        navigate('DateFeed', { scrollToDateId: data.date_id } as any);
+      }
       return;
     }
+
     switch (t) {
       case 'INVITE_RECEIVED':
         navigate('MyInvites', {
-          origin: 'Profile',
           inviteId: data?.invite_id,
           dateId: data?.date_id,
         } as any);
         break;
       case 'INVITE_ACCEPTED':
         navigate('MyDates', {
-          origin: 'Profile',
           initialTab: 'Accepted',
           dateId: data?.date_id,
         } as any);
         break;
       case 'JOIN_REQUEST':
         navigate('MyDates', {
-          origin: 'Profile',
           focus: 'JoinRequests',
           requestId: data?.request_id,
           dateId: data?.date_id,
         } as any);
         break;
       default:
-        if (data?.date_id)
-          navigate('DateFeed', {
-            scrollToDateId: data.date_id,
-            origin: 'Profile',
-          } as any);
+        if (data?.date_id) {
+          navigate('DateFeed', { scrollToDateId: data.date_id } as any);
+        }
         break;
     }
   } catch (e) {
@@ -123,12 +116,7 @@ function handleTapNavigation(data: any) {
   }
 }
 
-/**
- * Breadcrumb logger:
- * - Safe: doesn’t touch NavigationContainer props (since AppNavigator owns it)
- * - Uses RootNavigation.getCurrentRoute() if available
- * - Logs only on route change to avoid spam
- */
+/* -------------------- breadcrumb logger (optional) -------------------- */
 function BreadcrumbLogger() {
   const lastRouteRef = useRef<string | undefined>(undefined);
 
@@ -143,28 +131,20 @@ function BreadcrumbLogger() {
       if (lastRouteRef.current !== name) {
         lastRouteRef.current = name;
         try {
-          // This is the line you’ll scan for right before a native crash
           console.log('[Breadcrumb] route:', name);
         } catch {}
       }
     };
 
-    // 1) Log after first frame
     InteractionManager.runAfterInteractions(() => {
       if (!cancelled) logIfChanged();
     });
 
-    // 2) Log on app foreground
     const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
-      if (s === 'active') {
-        // small delay gives navigator time to settle
-        setTimeout(logIfChanged, 200);
-      }
+      if (s === 'active') setTimeout(logIfChanged, 200);
     });
 
-    // 3) Lightweight interval to catch route transitions (cleans itself up)
     const iv = setInterval(logIfChanged, 600);
-
     return () => {
       cancelled = true;
       try {
@@ -177,13 +157,20 @@ function BreadcrumbLogger() {
   return null;
 }
 
+/* -------------------- main app -------------------- */
 export default function App() {
-  // Unlock emitter adds after app is active + first frame (paired with SafeEmitterShim)
+  const listenersAttachedRef = useRef(false);
+
+  // Capture invite deep links at boot (works for cold start + while running)
+  useEffect(() => {
+    const stop = initInviteDeepLinking();
+    return () => { try { (stop as any)?.(); } catch {} };
+  }, []);
+
+  // Unlock SafeEmitter shim after app becomes active & interactions flush
   useEffect(() => {
     let cancelled = false;
-
     const unlockWhenReady = async () => {
-      // Wait until foreground
       if (AppState.currentState !== 'active') {
         await new Promise<void>((resolve) => {
           const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
@@ -196,7 +183,6 @@ export default function App() {
           });
         });
       }
-      // First frame
       await new Promise<void>((resolve) =>
         InteractionManager.runAfterInteractions(() => resolve())
       );
@@ -206,31 +192,30 @@ export default function App() {
         } catch {}
       }
     };
-
     void unlockWhenReady();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Start Supabase token auto-refresh (v2)
+  // Supabase auth auto-refresh
   useEffect(() => {
-    // @ts-ignore
     supabase.auth.startAutoRefresh?.();
+    return () => {
+      try {
+        supabase.auth.stopAutoRefresh?.();
+      } catch {}
+    };
   }, []);
 
-  // ✅ Keep Quick Unlock refresh token in sync with Supabase events (safe lazy require)
+  // Optional: refresh-token rotation hook (safe if missing)
   useEffect(() => {
-    let off: undefined | (() => void);
+    let off: undefined | (() => void>);
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { attachQuickUnlockRotationListener } = require('@services/QuickUnlockService');
       off = attachQuickUnlockRotationListener();
     } catch (e) {
-      console.warn(
-        '[QuickUnlock] rotation listener failed to attach:',
-        (e as Error)?.message
-      );
+      console.warn('[QuickUnlock] rotation listener not attached:', (e as Error)?.message);
     }
     return () => {
       try {
@@ -239,66 +224,84 @@ export default function App() {
     };
   }, []);
 
-  // Attach push listeners (DEV ONLY). In production this is a no-op.
+  // --- Push: register once on startup (prod-safe, lazy imports) ---
   useEffect(() => {
     if (!PUSH_ALLOWED) return;
 
-    const listenersAttachedRef = useRefLike(false);
+    let cancelled = false;
+    (async () => {
+      try {
+        const { initNotificationsOnce } = await import('@services/NotificationService');
+        if (!cancelled) await initNotificationsOnce();
+      } catch (e) {
+        console.warn('[Push] init failed:', (e as Error)?.message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // --- Push: attach listeners for foreground receipt & tap to open ---
+  useEffect(() => {
+    if (!PUSH_ALLOWED) return;
+
     let cancelled = false;
     let cleanups: Array<() => void> = [];
 
-    const safelyAttachPushListeners = async () => {
-      // First frame
+    const attach = async () => {
+      // Wait for UI to settle — avoids iOS 18 edge cases
       await new Promise<void>((resolve) =>
         InteractionManager.runAfterInteractions(() => resolve())
       );
-      // Small delay for nav readiness; iOS tends to need more
       await new Promise<void>((resolve) =>
-        setTimeout(() => resolve(), Platform.OS === 'ios' ? 450 : 60)
+        setTimeout(resolve, Platform.OS === 'ios' ? 450 : 60)
       );
       if (cancelled || listenersAttachedRef.current) return;
 
       try {
         const Notifications = await import('expo-notifications');
-        const { initNotificationsOnce } = await import('@services/NotificationService');
 
-        await initNotificationsOnce();
+        // Handle cold-start from a tap (if any)
+        try {
+          const last = await (Notifications as any).getLastNotificationResponseAsync?.();
+          const data = last?.notification?.request?.content?.data;
+          if (data) handleTapNavigation(data);
+        } catch {}
 
-        const receivedSub = Notifications.addNotificationReceivedListener((_n) => {});
-        const tapSub = Notifications.addNotificationResponseReceivedListener(
-          (response) => {
-            const data = response?.notification?.request?.content?.data;
+        const receivedSub =
+          Notifications.addNotificationReceivedListener?.(() => {}) as any;
+        const tapSub =
+          Notifications.addNotificationResponseReceivedListener?.((resp) => {
+            const data = resp?.notification?.request?.content?.data;
             handleTapNavigation(data);
-          }
-        );
+          }) as any;
 
         cleanups = [
           () => {
             try {
-              receivedSub.remove();
+              receivedSub?.remove?.();
             } catch {}
           },
           () => {
             try {
-              tapSub.remove();
+              tapSub?.remove?.();
             } catch {}
           },
         ];
 
         listenersAttachedRef.current = true;
       } catch (e) {
-        console.warn(
-          '[PushInit] failed to attach listeners:',
-          (e as Error)?.message
-        );
+        // If plugin is not present on iOS build, import will throw — safe to ignore
+        console.warn('[Push] listeners not attached:', (e as Error)?.message);
       }
     };
 
-    const kickOff = () => void safelyAttachPushListeners();
     const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
-      if (s === 'active') kickOff();
+      if (s === 'active') attach();
     });
-    if (AppState.currentState === 'active') kickOff();
+    if (AppState.currentState === 'active') attach();
 
     return () => {
       cancelled = true;
@@ -318,18 +321,12 @@ export default function App() {
       <SafeAreaProvider>
         <AppBootGate>
           <GlobalErrorBoundary>
-            {/* Breadcrumbs print [Breadcrumb] route: <Name> in device logs */}
             <BreadcrumbLogger />
-            {/* Toggle safe boot on/off via EXPO_PUBLIC_SAFE_BOOT (default ON) */}
+            {/* Toggle safe boot via EXPO_PUBLIC_SAFE_BOOT (defaults ON) */}
             {SAFE_BOOT ? <UltraSafeBoot /> : <AppNavigator />}
           </GlobalErrorBoundary>
         </AppBootGate>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
-}
-
-function useRefLike<T>(initial: T) {
-  const box = useRef<{ current: T }>({ current: initial });
-  return box.current;
 }

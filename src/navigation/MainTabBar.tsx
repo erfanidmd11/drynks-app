@@ -1,4 +1,3 @@
-// src/navigation/MainTabBar.tsx – FINAL PRODUCTION READY WITH VALIDATION, REALTIME UNREAD, AND FALLBACK
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
@@ -6,6 +5,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Text,
+  ScrollView,
 } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
@@ -40,13 +40,11 @@ const Logo = () => (
   />
 );
 
-// Keep an allow-list to avoid bad routes
 const VALID_SCREENS = new Set([
   'Explore', 'My DrYnks', 'Vibe', 'New Date',
   'CreateDate', 'InviteNearby', 'MyDates', 'DateFeed',
   'GroupChat', 'Messages', 'PrivateChat', 'Profile', 'EditProfile', 'MyInvites',
   'SentInvites', 'MySentInvites', 'JoinRequests', 'Settings',
-  // add more if you wire DateDetails etc.
 ]);
 
 const safeNavigate = (navigation: any, screen: string, params?: any) => {
@@ -79,30 +77,33 @@ const NotificationModal = ({
           {notifications.length === 0 ? (
             <Text style={{ color: '#999' }}>No notifications</Text>
           ) : (
-            notifications.slice(0, 10).map((n) => {
-              const isUnread = !n.read_at;
-              const label =
-                n.title ||
-                (n.type === 'invite_received' && 'You received an invite') ||
-                (n.type === 'invite_accepted' && 'Your invite was accepted') ||
-                (n.type === 'join_request_received' && 'Someone requested to join your date') ||
-                'Notification';
-              return (
-                <TouchableOpacity
-                  key={n.id}
-                  onPress={() => {
-                    onClose();
-                    markAsReadAndNavigate(n);
-                  }}
-                  style={{ paddingVertical: 8, opacity: isUnread ? 1 : 0.6 }}
-                >
-                  <Text style={{ color: '#111', fontWeight: isUnread ? '700' : '500' }}>
-                    {label}
-                  </Text>
-                  {!!n.body && <Text style={{ color: '#666', fontSize: 12 }}>{n.body}</Text>}
-                </TouchableOpacity>
-              );
-            })
+            <ScrollView style={{ maxHeight: 280 }}>
+              {notifications.map((n) => {
+                const isUnread = !n.read_at;
+                const label =
+                  n.title ||
+                  (n.type === 'invite_received' && 'You received an invite') ||
+                  (n.type === 'invite_accepted' && 'Your invite was accepted') ||
+                  (n.type === 'join_request_received' && 'Someone requested to join your date') ||
+                  'Notification';
+
+                return (
+                  <TouchableOpacity
+                    key={n.id}
+                    onPress={() => {
+                      onClose();
+                      markAsReadAndNavigate(n);
+                    }}
+                    style={{ paddingVertical: 8, opacity: isUnread ? 1 : 0.6 }}
+                  >
+                    <Text style={{ color: '#111', fontWeight: isUnread ? '700' : '500' }}>
+                      {label}
+                    </Text>
+                    {!!n.body && <Text style={{ color: '#666', fontSize: 12 }}>{n.body}</Text>}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
           )}
         </View>
       </View>
@@ -134,7 +135,6 @@ const MainTabBar = () => {
 
   const navigation = useNavigation<any>();
 
-  // Compute unread count
   const recalcUnread = useCallback((rows: DrYnksNotification[]) => {
     setUnreadCount(rows.filter((r) => !r.read_at).length);
   }, []);
@@ -154,7 +154,6 @@ const MainTabBar = () => {
     recalcUnread((data || []) as DrYnksNotification[]);
   }, [recalcUnread]);
 
-  // Initial session + first load
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -164,7 +163,6 @@ const MainTabBar = () => {
     })();
   }, [fetchForUser]);
 
-  // Realtime subscription to notifications (user-scoped)
   useEffect(() => {
     if (!userId) return;
     const channel = supabase
@@ -173,7 +171,6 @@ const MainTabBar = () => {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
         (payload) => {
-          // Merge changes: upsert simplistic
           setNotifications((prev) => {
             const rows = [...prev];
             const idx = rows.findIndex((r) => r.id === (payload.new as any)?.id);
@@ -191,7 +188,6 @@ const MainTabBar = () => {
       )
       .subscribe();
 
-    // Polling fallback (rarely needed)
     pollRef.current = setInterval(() => fetchForUser(userId), 30000);
 
     return () => {
@@ -200,33 +196,27 @@ const MainTabBar = () => {
     };
   }, [userId, fetchForUser]);
 
-  // Keep unread count in sync whenever notifications change
   useEffect(() => {
     recalcUnread(notifications);
   }, [notifications, recalcUnread]);
 
-  // Map a notification to a navigation target
   const navFromNotification = useCallback((n: DrYnksNotification) => {
     const data = n?.data || {};
     switch (n.type) {
       case 'invite_received':
         return { screen: 'MyInvites', params: undefined };
       case 'invite_accepted':
-        // Land on MyDates Accepted tab if your MyDates screen supports it. Otherwise just open MyDates.
         return { screen: 'MyDates', params: { initialTab: 'Accepted', dateId: data?.dateId || data?.date_id } };
       case 'join_request_received':
         return { screen: 'JoinRequests', params: undefined };
       default:
-        // Try to respect deep-link-like payload if present
         if (data?.screen && VALID_SCREENS.has(data.screen)) {
           return { screen: data.screen as string, params: data.params };
         }
-        // Fallback to feed (or MyDates)
         return { screen: 'Explore', params: undefined };
     }
   }, []);
 
-  // Mark a single notification read, then navigate
   const markAsReadAndNavigate = useCallback(async (n: DrYnksNotification) => {
     try {
       if (!n.read_at) {
@@ -236,7 +226,6 @@ const MainTabBar = () => {
           .eq('id', n.id);
       }
     } catch (e) {
-      // non-fatal
       console.warn('[MainTabBar] mark read error', e);
     }
     const target = navFromNotification(n);

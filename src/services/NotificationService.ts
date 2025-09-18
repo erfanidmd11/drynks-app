@@ -450,3 +450,115 @@ export async function initNotificationsOnce(): Promise<void> {
     console.warn('[Push] initNotificationsOnce error:', (e as Error).message);
   }
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   CHAT MESSAGE PUSH — server-first (Edge Function), client fallback
+   Call this right after inserting into public.chat_messages.
+   data payload opens GroupChat via AppNavigator (route 'GroupChat', dateId).
+────────────────────────────────────────────────────────────────────────── */
+
+/** Load all chat member user_ids for a date (creator + accepted_users). */
+async function getChatMemberIds(dateId: string): Promise<string[]> {
+  try {
+    const { data, error } = await supabase
+      .from('date_requests')
+      .select('creator, accepted_users')
+      .eq('id', dateId)
+      .maybeSingle();
+    if (error || !data) return [];
+    const out = new Set<string>();
+    if ((data as any)?.creator) out.add((data as any).creator as string);
+    const arr = Array.isArray((data as any)?.accepted_users)
+      ? ((data as any).accepted_users as string[])
+      : [];
+    arr.forEach((id) => id && out.add(id));
+    return Array.from(out);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fire a push for a new chat message. Uses Edge Function 'notify_chat_members' if present.
+ * Falls back to client-side fan-out to all chat members (except sender).
+ */
+export async function sendPushForMessage(input: {
+  dateId: string;
+  senderId: string;
+  text: string;
+  messageId?: string;
+}) {
+  if (PUSH_DISABLED) return;
+
+  // 1) Preferred path — server fan-out (Edge Function decides recipients)
+  try {
+    const { error } = await supabase.functions.invoke('notify_chat_members', {
+      body: {
+        dateId: input.dateId,
+        senderId: input.senderId,
+        messageId: input.messageId ?? null,
+        text: input.text,
+      },
+    });
+    if (!error) return;
+  } catch (e) {
+    if (__DEV__) console.log('[ChatPush] notify_chat_members missing/unavailable:', (e as any)?.message || e);
+  }
+
+  // 2) Fallback — client-side fan-out (best-effort)
+  try {
+    const members = await getChatMemberIds(input.dateId);
+    const recipients = members.filter((uid) => uid && uid !== input.senderId);
+    if (!recipients.length) return;
+
+    const payload = {
+      type: 'CHAT_MESSAGE',
+      route: 'GroupChat',
+      dateId: input.dateId,
+      messageId: input.messageId ?? null,
+    };
+
+    // Gather tokens
+    const tokenList: string[] = [];
+    for (const uid of recipients) {
+      const toks = await fetchUserDeviceTokens(uid);
+      toks.forEach((t) => tokenList.push(t));
+    }
+    if (!tokenList.length) {
+      // At least ensure bell shows a badge
+      await Promise.all(
+        recipients.map((uid) =>
+          insertBellNotification(uid, 'generic', {
+            screen: 'GroupChat',
+            params: { dateId: input.dateId },
+            meta: { preview: input.text },
+          })
+        )
+      );
+      return;
+    }
+
+    // Send Expo pushes
+    const msgs = tokenList.map((to) => ({
+      to,
+      title: 'New message',
+      body: input.text,
+      data: payload,
+    }));
+    const { badTokens } = await sendExpoPush(msgs);
+    if (badTokens.length) await pruneInvalidTokens(badTokens);
+
+    // Mirror bell notifications
+    await Promise.all(
+      recipients.map((uid) =>
+        insertBellNotification(uid, 'generic', {
+          screen: 'GroupChat',
+          params: { dateId: input.dateId },
+          meta: { preview: input.text },
+        })
+      )
+    );
+  } catch (err) {
+    console.warn('[ChatPush] fallback fan-out failed:', (err as any)?.message || err);
+  }
+}

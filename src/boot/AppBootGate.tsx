@@ -1,50 +1,49 @@
-// src/boot/SafeEmitterShim.ts
-// Prevent iOS 18 TurboModule aborts when addListener/removeListeners are
-// called on a non-emitter module. Logs the module so we can fix the source.
+// src/boot/AppBootGate.tsx
 
-import * as RN from 'react-native';
+import React, { useEffect } from 'react';
+import { AppState, AppStateStatus, InteractionManager } from 'react-native';
 
-const OriginalNEE = RN.NativeEventEmitter as any;
+import { unlockEmitters } from './SafeEmitterShim';
 
-class SafeNativeEventEmitter extends OriginalNEE {
-  private __nativeModule: any;
+export default function AppBootGate({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    let cancelled = false;
 
-  constructor(nativeModule?: any) {
-    const isEmitter =
-      !!nativeModule &&
-      (typeof nativeModule.addListener === 'function' ||
-       typeof nativeModule.removeListeners === 'function');
-
-    super(isEmitter ? nativeModule : undefined);
-    this.__nativeModule = isEmitter ? nativeModule : null;
-
-    if (!isEmitter && nativeModule) {
-      try {
-        const name =
-          nativeModule?.name ??
-          nativeModule?.getName?.() ??
-          nativeModule?.getConstants?.()?.name ??
-          'UnknownNativeModule';
-        console.warn(`[SafeEmitterShim] Suppressed NativeEventEmitter for non-emitter: ${name}`);
-      } catch {
-        console.warn('[SafeEmitterShim] Suppressed NativeEventEmitter for non-emitter (unknown name)');
+    const unlockWhenReady = async () => {
+      // Wait for app to be active
+      if (AppState.currentState !== 'active') {
+        await new Promise<void>((resolve) => {
+          const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
+            if (s === 'active') {
+              try {
+                sub.remove();
+              } catch {}
+              resolve();
+            }
+          });
+        });
       }
-    }
-  }
 
-  addListener(eventType: string, listener: (...args: any[]) => any, context?: any) {
-    if (!this.__nativeModule || typeof this.__nativeModule.addListener !== 'function') {
-      return { remove: () => {} } as any;
-    }
-    return super.addListener(eventType, listener, context);
-  }
+      // Wait for JS event loop to be idle
+      await new Promise<void>((resolve) =>
+        InteractionManager.runAfterInteractions(() => resolve())
+      );
 
-  removeAllListeners(eventType: string) {
-    if (!this.__nativeModule || typeof this.__nativeModule.removeListeners !== 'function') {
-      return;
-    }
-    return super.removeAllListeners(eventType);
-  }
+      if (!cancelled) {
+        try {
+          unlockEmitters(); // 🔓 Enables `addListener/removeListeners` on TurboModules
+        } catch (err) {
+          console.warn('[AppBootGate] unlockEmitters failed:', err);
+        }
+      }
+    };
+
+    void unlockWhenReady();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return <>{children}</>;
 }
-
-(RN as any).NativeEventEmitter = SafeNativeEventEmitter;

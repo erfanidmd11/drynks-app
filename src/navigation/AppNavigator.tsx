@@ -1,14 +1,25 @@
 // src/navigation/AppNavigator.tsx
-// Production ready; respects onboarding_complete, optional Step 8, deep links
+// Production ready; prefers server current_step, correct step order, deep links, safe onboarding resume
+// Adds silent session restore + auth-change listener for refresh-token rotation.
 
-import React, { useEffect, useState, useCallback } from 'react';
-import { NavigationContainer, DefaultTheme, type LinkingOptions } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import React, { useEffect, useState, useCallback, memo } from 'react';
+import {
+  NavigationContainer,
+  DefaultTheme,
+  type LinkingOptions,
+} from '@react-navigation/native';
+import {
+  createNativeStackNavigator,
+  type NativeStackScreenProps,
+} from '@react-navigation/native-stack';
 import { View, ActivityIndicator } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '@config/supabase';
 import { navigationRef, onNavigationReady } from '@navigation/RootNavigation';
-import type { RootStackParamList } from '../types/navigation'; // <-- SSOT (fixed path)
+import type { RootStackParamList } from '../types/navigation';
+
+// session bootstrap utilities (refresh-token restore + listener)
+import { bootstrapSession, listenForAuthChanges } from '@utils/sessionBootstrap';
 
 // Screens
 import LoginScreen from '../screens/Auth/LoginScreen';
@@ -26,94 +37,129 @@ import SignupStepNine from '../screens/Onboarding/SignupStepNine';
 import SignupStepTen from '../screens/Onboarding/SignupStepTen';
 import SignupStepEleven from '../screens/Onboarding/SignupStepEleven';
 import EnterOtpScreen from '../screens/EnterOtpScreen';
+
 import InviteNearbyScreen from '../screens/Dates/InviteNearbyScreen';
 import CreateDateScreen from '../screens/Dates/CreateDateScreen';
 import MyDatesScreen from '../screens/Dates/MyDatesScreen';
 import DateFeedScreen from '../screens/Home/DateFeedScreen';
+
 import GroupChatScreen from '../screens/Messages/GroupChatScreen';
 import MessagesScreen from '../screens/Messages/MessagesScreen';
 import PrivateChatScreen from '../screens/Messages/PrivateChatScreen';
+
 import ProfileDetailsScreen from '../screens/Profile/ProfileDetailsScreen';
 import EditProfileScreen from '../screens/Profile/EditProfileScreen';
+
+// Single export used for both MyInvites and ReceivedInvites aliases
 import MyInvitesScreen from '../screens/Dates/ReceivedInvitesScreen';
 import SentInvitesScreen from '../screens/Dates/SentInvitesScreen';
 import MySentInvitesScreen from '../screens/Dates/MySentInvitesScreen';
 import JoinRequestsScreen from '../screens/Dates/JoinRequestsScreen';
-import MyApplicantsScreen from '../screens/Dates/MyApplicantsScreen';
 import ManageApplicantsScreen from '../screens/Dates/ManageApplicantsScreen';
 import SettingsScreen from '../screens/Profile/SettingsScreen';
 
-// Use a relaxed Stack type to avoid friction while routes/types evolve
-const Stack = createNativeStackNavigator<any>();
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
-// ------- Deep link config (relaxed typing) -------
-const linking: LinkingOptions<any> = {
+const linking: LinkingOptions<RootStackParamList> = {
   prefixes: ['dr-ynks://', 'https://dr-ynks.app.link', 'https://dr-ynks.page.link'],
   config: {
     screens: {
+      // Deep links
+      GroupChat: 'chat/:dateId',                 // <— open a chat by date id
       DateFeed: 'invite/:scrollToDateId',
+
+      // Invites / requests
       MyInvites: 'received-invites',
       SentInvites: 'sent-invites',
       JoinRequests: 'join-requests',
-      MyApplicants: 'my-applicants',
       ManageApplicants: 'manage-applicants/:dateId?',
+
+      // Profiles
       PublicProfile: 'profile/:userId',
     },
   },
 };
 
-const AppNavigator = () => {
-  // Keep it string to satisfy React Navigation even if the SSOT doesn't include a route yet
-  const [initialRoute, setInitialRoute] = useState<string>('Splash');
+// Wrapper to pass deep-link param via prop (no render function children)
+type DateFeedWrapperProps = NativeStackScreenProps<RootStackParamList, 'DateFeed'>;
+const DateFeedWrapper = memo(({ route, navigation }: DateFeedWrapperProps) => {
+  const scrollToDateId = route?.params?.scrollToDateId;
+  return (
+    <DateFeedScreen
+      route={route}
+      navigation={navigation}
+      scrollToDateId={scrollToDateId}
+    />
+  );
+});
+
+const ALLOWED_INITIAL_ROUTES = new Set<keyof RootStackParamList>([
+  'Splash',
+  'App',
+  'Login',
+  'EnterOtpScreen',
+  'ProfileSetupStepOne',
+  'ProfileSetupStepTwo',
+  'ProfileSetupStepThree',
+  'ProfileSetupStepFour',
+  'ProfileSetupStepFive',
+  'ProfileSetupStepSix',
+  'ProfileSetupStepSeven',
+  'ProfileSetupStepEight',
+  'ProfileSetupStepNine',
+  'ProfileSetupStepTen',
+  'ProfileSetupStepEleven',
+]);
+
+const AppNavigator: React.FC = () => {
+  const [initialRoute, setInitialRoute] =
+    useState<keyof RootStackParamList>('Splash');
   const [loading, setLoading] = useState(true);
-  const [deepLinkDateId, setDeepLinkDateId] = useState<string | undefined>(undefined);
 
   const clearLocalOnboardingIfLoggedOut = useCallback(async () => {
     try {
-      await AsyncStorage.multiRemove(['onboarding:wip_step', 'onboarding:wip_payload']);
-    } catch {}
+      await AsyncStorage.multiRemove([
+        'onboarding:wip_step',
+        'onboarding:wip_payload',
+        'onboarding_draft_v1',
+      ]);
+    } catch {
+      // no-op
+    }
   }, []);
-
-  const hasAnySocialHandle = (profile: any) =>
-    Boolean(
-      profile?.social_handle ||
-        profile?.instagram_handle ||
-        profile?.tiktok_handle ||
-        profile?.facebook_handle
-    );
 
   const getNextIncompleteStep = (profile: any): keyof RootStackParamList | null => {
     if (profile?.onboarding_complete) return null;
-
     if (!profile?.birthdate) return 'ProfileSetupStepTwo';
     if (!profile?.first_name || !profile?.screenname) return 'ProfileSetupStepThree';
     if (!profile?.phone) return 'ProfileSetupStepFour';
     if (!profile?.gender) return 'ProfileSetupStepFive';
-
     const prefs = profile?.preferences;
     if (!Array.isArray(prefs) || prefs.length === 0) return 'ProfileSetupStepSix';
-    if (!profile?.agreed_to_terms) return 'ProfileSetupStepSeven';
-
-    if (!hasAnySocialHandle(profile)) return 'ProfileSetupStepEight';
-
+    if (!profile?.orientation) return 'ProfileSetupStepSeven';
+    if (!(profile?.social_handle || profile?.instagram_handle || profile?.tiktok_handle || profile?.facebook_handle))
+      return 'ProfileSetupStepEight';
     if (!profile?.location) return 'ProfileSetupStepNine';
     const gallery = profile?.gallery_photos;
     if (!profile?.profile_photo || !Array.isArray(gallery) || gallery.length < 3)
       return 'ProfileSetupStepTen';
-    if (!profile?.orientation) return 'ProfileSetupStepEleven';
-
+    if (!profile?.agreed_to_terms) return 'ProfileSetupStepEleven';
     return null;
   };
 
   useEffect(() => {
     let isMounted = true;
+    const unsubscribeAuth = listenForAuthChanges();
 
     const bootstrap = async () => {
       try {
+        await bootstrapSession();
+
         const { data, error } = await supabase.auth.getSession();
         if (error) throw error;
 
         const current = data?.session ?? null;
+
         if (!current?.user?.id) {
           await clearLocalOnboardingIfLoggedOut();
           if (!isMounted) return;
@@ -127,20 +173,25 @@ const AppNavigator = () => {
           .eq('id', current.user.id)
           .single();
 
+        if (!isMounted) return;
+
         if (!profile) {
-          if (!isMounted) return;
           setInitialRoute('ProfileSetupStepOne');
           return;
         }
 
         if (profile.onboarding_complete) {
-          if (!isMounted) return;
           setInitialRoute('App');
           return;
         }
 
+        if (profile.current_step && profile.current_step !== 'Complete') {
+          const step = profile.current_step as keyof RootStackParamList;
+          setInitialRoute(ALLOWED_INITIAL_ROUTES.has(step) ? step : 'App');
+          return;
+        }
+
         const next = getNextIncompleteStep(profile);
-        if (!isMounted) return;
         setInitialRoute(next || 'App');
       } catch (e) {
         console.error('[INIT ERROR]', e);
@@ -152,20 +203,12 @@ const AppNavigator = () => {
     };
 
     bootstrap();
+
     return () => {
       isMounted = false;
+      unsubscribeAuth();
     };
   }, [clearLocalOnboardingIfLoggedOut]);
-
-  const syncDeepLinkParamFromNavState = useCallback(() => {
-    try {
-      const route = navigationRef.getCurrentRoute();
-      if (route?.name === 'DateFeed') {
-        const id = (route.params as any)?.scrollToDateId as string | undefined;
-        setDeepLinkDateId(id);
-      }
-    } catch {}
-  }, []);
 
   if (loading) {
     return (
@@ -179,18 +222,14 @@ const AppNavigator = () => {
     <NavigationContainer
       ref={navigationRef}
       linking={linking}
-      theme={{ ...DefaultTheme }}
-      onReady={() => {
-        onNavigationReady();
-        syncDeepLinkParamFromNavState();
-      }}
-      onStateChange={syncDeepLinkParamFromNavState}
+      theme={DefaultTheme}
+      onReady={onNavigationReady}
     >
       <Stack.Navigator
         screenOptions={{ headerShown: false, animation: 'fade_from_bottom' }}
         initialRouteName={initialRoute}
       >
-        {/* Onboarding & Auth */}
+        {/* ---------- Auth + Onboarding ---------- */}
         <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="ProfileSetupStepOne" component={SignupStepOne} />
         <Stack.Screen name="EnterOtpScreen" component={EnterOtpScreen} />
@@ -206,38 +245,38 @@ const AppNavigator = () => {
         <Stack.Screen name="ProfileSetupStepEleven" component={SignupStepEleven} />
         <Stack.Screen name="Login" component={LoginScreen} />
 
-        {/* App */}
+        {/* ---------- Main App (tabs) ---------- */}
         <Stack.Screen name="App" component={MainTabBar} />
         <Stack.Screen name="CreateDate" component={CreateDateScreen} />
+        {/* Legacy alias (remove after migrating callers) */}
+        <Stack.Screen name="New Date" component={CreateDateScreen} />
         <Stack.Screen name="InviteNearby" component={InviteNearbyScreen} />
         <Stack.Screen name="MyDates" component={MyDatesScreen} />
-        <Stack.Screen
-          name="DateFeed"
-          component={(props: any) => <DateFeedScreen {...props} scrollToDateId={deepLinkDateId} />}
-        />
+
+        {/* Date Feed (deep-link friendly via wrapper) */}
+        <Stack.Screen name="DateFeed" component={DateFeedWrapper} />
+
+        {/* ---------- Messaging / Profiles ---------- */}
         <Stack.Screen name="GroupChat" component={GroupChatScreen} />
         <Stack.Screen name="Messages" component={MessagesScreen} />
         <Stack.Screen name="PrivateChat" component={PrivateChatScreen} />
-
-        {/* Profile */}
         <Stack.Screen name="Profile" component={ProfileDetailsScreen} />
         <Stack.Screen name="PublicProfile" component={ProfileDetailsScreen} />
         <Stack.Screen name="EditProfile" component={EditProfileScreen} />
 
-        {/* Invites / Requests */}
+        {/* ---------- Invites / Applicants (AppShell renders their header) ---------- */}
         <Stack.Screen name="MyInvites" component={MyInvitesScreen} />
+        <Stack.Screen name="ReceivedInvites" component={MyInvitesScreen} />
         <Stack.Screen name="SentInvites" component={SentInvitesScreen} />
         <Stack.Screen name="MySentInvites" component={MySentInvitesScreen} />
         <Stack.Screen name="JoinRequests" component={JoinRequestsScreen} />
-
-        {/* Applicants */}
-        <Stack.Screen name="MyApplicants" component={MyApplicantsScreen} />
         <Stack.Screen name="ManageApplicants" component={ManageApplicantsScreen} />
 
-        {/* Settings */}
+        {/* ---------- Settings ---------- */}
         <Stack.Screen
           name="Settings"
           component={SettingsScreen}
+          // keep as-is; flip to false if Settings also renders AppShell internally
           options={{ headerShown: true, title: 'Settings' }}
         />
       </Stack.Navigator>

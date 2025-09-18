@@ -10,6 +10,7 @@ import {
   Image,
   Animated,
   Easing,
+  Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -30,7 +31,10 @@ type UnreadCounts = {
 
 const ProfileMenu: React.FC = () => {
   const navigation = useNavigation<any>();
-  const [visible, setVisible] = useState(false);
+
+  // ───────────────── State ─────────────────
+  const [mounted, setMounted] = useState(false); // controls <Modal visible>
+  const [open, setOpen] = useState(false);       // logical open/close (for effects)
   const [profileUrl, setProfileUrl] = useState('');
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [counts, setCounts] = useState<UnreadCounts>({
@@ -84,7 +88,7 @@ const ProfileMenu: React.FC = () => {
         .eq('user_id', userId)
         .is('read_at', null);
 
-    if (error) throw error;
+      if (error) throw error;
 
       const tally: UnreadCounts = {
         invite_received: 0,
@@ -106,10 +110,10 @@ const ProfileMenu: React.FC = () => {
     if (currentUserId) fetchUnreadCounts(currentUserId);
   }, [currentUserId, fetchUnreadCounts]);
 
-  // Refresh counts whenever the menu opens
+  // Refresh counts whenever the menu actually opens
   useEffect(() => {
-    if (visible && currentUserId) fetchUnreadCounts(currentUserId);
-  }, [visible, currentUserId, fetchUnreadCounts]);
+    if (open && currentUserId) fetchUnreadCounts(currentUserId);
+  }, [open, currentUserId, fetchUnreadCounts]);
 
   // Mark read for specific types, then refresh counters
   const markReadForTypes = useCallback(
@@ -130,34 +134,43 @@ const ProfileMenu: React.FC = () => {
     [currentUserId, fetchUnreadCounts]
   );
 
-  // ───────────────── Menu open/close ─────────────────
-  const showMenu = () => {
-    setVisible(true);
-    fadeAnim.setValue(0);
-    scaleAnim.setValue(0.96);
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 220,
-        easing: Easing.out(Easing.ease),
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: 1,
-        bounciness: 6,
-        speed: 18,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  };
+  // ───────────────── Menu open/close (no state updates during insertion) ─────────────────
+  const showMenu = useCallback(() => {
+    // mount modal first, then animate on the next frame
+    setMounted(true);
+    requestAnimationFrame(() => {
+      setOpen(true);
+      fadeAnim.setValue(0);
+      scaleAnim.setValue(0.96);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 220,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.spring(scaleAnim, {
+          toValue: 1,
+          bounciness: 6,
+          speed: 18,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    });
+  }, [fadeAnim, scaleAnim]);
 
-  const hideMenu = () => {
-    Animated.timing(fadeAnim, {
-      toValue: 0,
-      duration: 160,
-      useNativeDriver: true,
-    }).start(() => setVisible(false));
-  };
+  const hideMenu = useCallback(() => {
+    setOpen(false);
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 0, duration: 160, useNativeDriver: true }),
+      Animated.timing(scaleAnim, { toValue: 0.96, duration: 160, useNativeDriver: true }),
+    ]).start(({ finished }) => {
+      if (finished) {
+        // unmount on the next frame — avoids scheduling updates during insertion
+        requestAnimationFrame(() => setMounted(false));
+      }
+    });
+  }, [fadeAnim, scaleAnim]);
 
   // ───────────────── Actions ─────────────────
   const handleLogout = async () => {
@@ -213,26 +226,15 @@ const ProfileMenu: React.FC = () => {
     }
   };
 
-  // ───────────────── Applicants ─────────────────
-  const goToMyApplicants = () => {
-    hideMenu();
-    // Robust: try several route names in case navigator labels differ
-    try { navigation.navigate('MyApplicants'); return; } catch {}
-    try { navigation.navigate('Applicants'); return; } catch {}
-    try { navigation.navigate('ApplicantsList'); return; } catch {}
-    try { navigation.navigate('Dates', { screen: 'MyApplicants' }); return; } catch {}
-  };
 
   const goToManageApplicants = () => {
     hideMenu();
-    // Primary route name we’ll register in AppNavigator:
     try { navigation.navigate('ManageApplicants'); return; } catch {}
-    // Fallbacks if an older name exists in your project:
     try { navigation.navigate('ApplicantsManage'); return; } catch {}
     try { navigation.navigate('ApplicantsManager'); return; } catch {}
   };
 
-  // ───────────────── Small badge ─────────────────
+  // Small badge
   const Badge = ({ count }: { count: number }) =>
     count > 0 ? (
       <View style={styles.badge}>
@@ -256,7 +258,13 @@ const ProfileMenu: React.FC = () => {
         />
       </TouchableOpacity>
 
-      <Modal visible={visible} transparent animationType="none" onRequestClose={hideMenu}>
+      <Modal
+        visible={mounted}
+        transparent
+        animationType="none"
+        onRequestClose={hideMenu}
+        presentationStyle="overFullScreen"
+      >
         {/* Tap outside to close */}
         <TouchableOpacity style={styles.overlay} onPress={hideMenu} activeOpacity={1}>
           <Animated.View
@@ -285,10 +293,6 @@ const ProfileMenu: React.FC = () => {
               <Badge count={counts.join_request_received} />
             </TouchableOpacity>
 
-            {/* Applicants */}
-            <TouchableOpacity onPress={goToMyApplicants} accessibilityRole="button" style={styles.row}>
-              <Text style={styles.item}>My Applicants</Text>
-            </TouchableOpacity>
 
             <TouchableOpacity onPress={goToManageApplicants} accessibilityRole="button" style={styles.row}>
               <Text style={styles.item}>Manage Applicants</Text>
@@ -330,11 +334,12 @@ const styles = StyleSheet.create({
     backgroundColor: DRYNKS_WHITE,
     borderRadius: 12,
     padding: 14,
+    // shadow
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    ...Platform.select({ android: { elevation: 8 } }),
   },
   title: {
     fontWeight: '700',

@@ -1,0 +1,133 @@
+
+> DrYnks@1.0.0 handoff
+> bash scripts/handoff.sh
+
+──────────────── DrYnks Handoff Snapshot ────────────────
+Sat Sep 13 11:53:29 PDT 2025
+
+Node:     v18.18.2
+NPM:      9.8.1
+Yarn:     [31m[1mUsage Error[22m[39m: Invalid package manager specification in package.json; expected a semver version
+
+[1m$ [22myarn ...
+PNPM:     [31m[1mUsage Error[22m[39m: Invalid package manager specification in package.json; expected a semver version
+
+[1m$ [22mpnpm ...
+Expo CLI: 0.24.18
+
+package.json name/version:
+DrYnks @ 1.0.0
+Dependencies (top 20):
+@expo/config-plugins@10.1.1, @expo/vector-icons@14.1.0, @react-native-async-storage/async-storage@2.1.2, @react-native-community/datetimepicker@8.4.1, @react-native-community/netinfo@11.4.1, @react-native-picker/picker@2.11.1, @react-navigation/bottom-tabs@6.5.11, @react-navigation/native@6.1.14, @react-navigation/native-stack@6.9.21, @sendgrid/mail@8.1.5, @supabase/supabase-js@2.50.2, axios@1.11.0, base-64@^1.0.0, date-fns-tz@3.2.0, dotenv@17.2.0, expo@53.0.17, expo-apple-authentication@7.2.4, expo-av@15.1.7, expo-blur@~14.1.5, expo-build-properties@0.14.8
+
+Git:
+  Branch:  main
+  Commit:  5ede179a
+  Status:
+ M .DS_Store
+ M .env
+ M App.tsx
+ M app.config.ts
+ M babel.config.js
+ D choose
+ M eas.json
+ M index.js
+ M package-lock.json
+ M package.json
+ M src/boot/AppBootGate.tsx
+ M src/boot/UltraSafeBoot.tsx
+ M src/components/AppShell.tsx
+ M src/components/cards/DateCard.tsx
+ M src/components/common/ProfileMenu.tsx
+ M src/config/supabase.ts
+ M src/navigation/AppNavigator.tsx
+ M src/screens/Auth/LoginScreen.tsx
+ M src/screens/Dates/CreateDateScreen.tsx
+ M src/screens/Dates/InviteNearbyScreen.tsx
+ M src/screens/Dates/JoinRequestsScreen.tsx
+ M src/screens/Dates/ManageApplicantsScreen.tsx
+ M src/screens/Dates/MyDatesScreen.tsx
+ M src/screens/Dates/MySentInvitesScreen.tsx
+ M src/screens/Dates/ReceivedInvitesScreen.tsx
+ M src/screens/EnterOtpScreen.tsx
+ M src/screens/Home/DateFeedScreen.tsx
+ M src/screens/Messages/GroupChatScreen.tsx
+ M src/screens/Messages/MessagesScreen.tsx
+ M src/screens/Messages/PrivateChatScreen.tsx
+ M src/screens/Onboarding/SignupStepEight.tsx
+ M src/screens/Onboarding/SignupStepEleven.tsx
+ M src/screens/Onboarding/SignupStepFive.tsx
+ M src/screens/Onboarding/SignupStepFour.tsx
+ M src/screens/Onboarding/SignupStepNine.tsx
+ M src/screens/Onboarding/SignupStepOne.tsx
+ M src/screens/Onboarding/SignupStepSeven.tsx
+ M src/screens/Onboarding/SignupStepSix.tsx
+ M src/screens/Onboarding/SignupStepTen.tsx
+ M src/screens/Onboarding/SignupStepThree.tsx
+ M src/screens/Onboarding/SignupStepTwo.tsx
+ M src/screens/Profile/EditProfileScreen.tsx
+ M src/screens/Profile/ProfileDetailsScreen.tsx
+ M src/types/navigation.d.ts
+ M src/types/navigation.ts
+ M src/utils/biometrics.ts
+?? handoff.txt
+?? metro.config.js
+?? react-native.config.js
+?? scripts/
+?? src/boot/polyfills.ts
+?? src/components/nav/GlassBackButton.tsx
+?? src/components/ui/
+?? src/types/route-name.ts
+?? src/utils/credentials.ts
+?? src/utils/navigationHooks.ts
+?? src/utils/onboardingDraft.ts
+?? src/utils/resetAuth.ts
+?? src/utils/sessionBootstrap.ts
+
+React Native version:
+0.79.5
+Expo SDK:
+53.0.17
+
+Scan: files that use Platform.* but don't obviously import it
+(heuristic; please eyeball results)
+-----------------------------------------------------------
+⚠️  src/boot/UltraSafeBoot.tsx
+⚠️  src/components/cards/DateCard.tsx
+⚠️  src/components/cards/ProfileCard.tsx
+⚠️  src/components/common/ProfileMenu.tsx
+⚠️  src/screens/Auth/LoginScreen.tsx
+⚠️  src/screens/Dates/CreateDateScreen.tsx
+⚠️  src/screens/Dates/InviteNearbyScreen.tsx
+⚠️  src/screens/Dates/MyDatesScreen.tsx
+⚠️  src/screens/EnterOtpScreen.tsx
+⚠️  src/screens/Messages/GroupChatScreen.tsx
+⚠️  src/screens/Messages/PrivateChatScreen.tsx
+⚠️  src/screens/Onboarding/SignupStepEight.tsx
+⚠️  src/screens/Onboarding/SignupStepEleven.tsx
+⚠️  src/screens/Onboarding/SignupStepFive.tsx
+⚠️  src/screens/Onboarding/SignupStepFour.tsx
+⚠️  src/screens/Onboarding/SignupStepNine.tsx
+⚠️  src/screens/Onboarding/SignupStepOne.tsx
+⚠️  src/screens/Onboarding/SignupStepSeven.tsx
+⚠️  src/screens/Onboarding/SignupStepSix.tsx
+⚠️  src/screens/Onboarding/SignupStepTen.tsx
+⚠️  src/screens/Onboarding/SignupStepThree.tsx
+⚠️  src/screens/Onboarding/SignupStepTwo.tsx
+⚠️  src/screens/Onboarding/SplashScreen.tsx
+⚠️  src/screens/Profile/EditProfileScreen.tsx
+⚠️  src/services/QuickUnlockService.ts
+⚠️  src/utils/biometrics.ts
+
+Environment (masked):
+sed: 1: "s/https:\\/\\///": bad flag in substitute command: '/'
+  SUPABASE_URL: 
+  SUPABASE_ANON_KEY: unset | length 0
+  GOOGLE_API_KEY: 
+  EXPO_PUBLIC_GOOGLE_API_KEY: 
+
+Run:  npm run start:dev
+If the app crashes at launch, attach the last 50 Metro lines:
+  (press 'j' for debugger; or copy terminal output)
+
+──────────────── End Snapshot ────────────────────────────

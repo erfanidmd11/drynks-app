@@ -1,3 +1,4 @@
+// src/LinkHandler.tsx
 import { useEffect } from 'react';
 import * as Linking from 'expo-linking';
 import { useNavigation } from '@react-navigation/native';
@@ -13,6 +14,7 @@ const LinkHandler = () => {
 
       console.log('[DeepLink] Incoming URL:', url);
 
+      // Magic link / OAuth callback
       if (parsed?.path === 'auth/callback') {
         console.log('[DeepLink] Caught verification callback');
 
@@ -38,7 +40,7 @@ const LinkHandler = () => {
               return;
             }
 
-            profile = { id: user.id }; // fallback profile object
+            profile = { id: user.id }; // fallback object
           }
 
           const step = getNextIncompleteStep(profile);
@@ -55,16 +57,18 @@ const LinkHandler = () => {
       }
     };
 
-    // subscribe after a small delay (as in your original)
+    // Delay a bit so the navigator is ready (as in your original)
     const timeout = setTimeout(() => {
       console.log('[LinkHandler] Initializing deep link listener...');
       const sub = Linking.addEventListener('url', handleDeepLink);
-      // cleanup for the listener happens in the effect cleanup
+
+      // Also process the initial URL if any
       (async () => {
         const initialUrl = await Linking.getInitialURL();
         if (initialUrl) await handleDeepLink({ url: initialUrl });
       })();
-      // store sub on window to remove later if desired (optional)
+
+      // Store for cleanup (optional)
       // @ts-ignore
       (global as any).__linkSub = sub;
     }, 2000);

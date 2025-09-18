@@ -1,9 +1,11 @@
 // src/screens/Home/DateFeedScreen.tsx
-// Production ready (stable pagination + pull-to-refresh + focus refresh + FaceID first-arrival prompt + per-user "Not Interested")
-// - Hides "Not Interested" cards permanently for the signed-in user (AsyncStorage + optional server persist)
-// - No jumping/jitter (separate flags + momentum gate)
-// - Uses your filters/header/footer as-is
-// - Passes openProfile/openDateDetails + onNotInterested to DateCard
+// Date Feed — production-ready, tolerant to both vw_feed_dates_v2 and vw_feed_dates
+// FIXES:
+//  - Provide creator screenname/birthdate/preferences so DateCard can show Host name + age
+//  - Provide accepted_profiles with same fields so "Guest" slide shows name + age
+//  - Populate who_pays from date_requests so DateCard doesn't show "💸 Unknown"
+//  - NEW: If user comes in via an invite link we claimed after login, the linked date
+//         is fetched and **pinned to the top immediately**, and we scroll to it.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -12,28 +14,31 @@ import {
   RefreshControl,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  Keyboard,
-  TouchableWithoutFeedback,
   FlatList,
   Alert,
   ActivityIndicator,
+  TextInput,
+  Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute, CommonActions } from '@react-navigation/native';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { supabase } from '@config/supabase';
-import CustomLocationInput from '@components/CustomLocationInput';
+import { v4 as uuidv4 } from 'uuid';
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
 import DateCard from '@components/cards/DateCard';
 import { tryPromptIfArmed } from '@services/QuickUnlockService';
+import { supabase } from '@config/supabase';
 
+// ⬇️ NEW: invite service — used to claim any pending deep-link and get date_id
+import { consumePendingInviteAfterLogin } from '@services/InviteLinks';
+
+// ---- Theme
 const DRYNKS_BLUE = '#232F39';
 const DRYNKS_GRAY = '#F5F5F5';
 const DRYNKS_RED = '#E34E5C';
 
+// ---- Filters
 const sortOptions = ['Upcoming', 'Distance', 'Newest', 'Oldest'] as const;
 const stateOptions = ['Available Dates', 'Filled Dates', 'Passed Dates', 'All'] as const;
 const typeOptions = ['group', 'one-on-one'] as const;
@@ -43,10 +48,22 @@ type UUID = string;
 type Profile = {
   id: UUID;
   gender: string | null;
-  orientation: string;
+  orientation: string | null;
   latitude: number | null;
   longitude: number | null;
   location?: string | null;
+  profile_photo?: string | null;
+};
+
+type ProfileHydrated = {
+  id: UUID;
+  screenname?: string | null;
+  birthdate?: string | null;
+  gender?: string | null;
+  orientation?: string | null;
+  profile_photo?: string | null;
+  location?: string | null;
+  preferences?: string[] | null;
 };
 
 type DateRow = {
@@ -57,32 +74,51 @@ type DateRow = {
   event_type: string | null;
   orientation_preference: string[] | null;
   distance_miles: number | null;
-  profile_photo: string | null;
-  photo_urls: string[];
+  profile_photo: string | null; // creator/host avatar
+  photo_urls: string[];         // first image will be used as cover by DateCard
   creator_id: UUID;
-  creator_profile: any | null;
-  accepted_profiles: any[] | null;
+  creator_profile: ProfileHydrated | null;
+  accepted_profiles: ProfileHydrated[] | null;
   created_at?: string | null;
   latitude?: number | null;
   longitude?: number | null;
   location?: string | null;
   spots?: number | null;
-  preferred_gender_counts?: Record<string, number> | null;
   remaining_gender_counts?: Record<string, number> | null;
 };
 
 const PAGE_SIZE = 10;
 
-// WKT/hex-ish guard that sometimes sneaks into location columns
+// Helpers
 const looksLikeWKTOrHex = (s?: string | null) =>
   !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(String(s)));
 
 const hiddenKeyFor = (uid: string) => `hidden_dates_v1:${uid}`;
 
+// Google Places
+const GOOGLE_KEY =
+  (process.env as any)?.EXPO_PUBLIC_GOOGLE_API_KEY ||
+  (process.env as any)?.GOOGLE_API_KEY ||
+  '';
+
+type Suggestion = { description: string; place_id: string };
+const AUTOCOMPLETE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
+const DETAILS_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/details/json';
+
+// Debounce hook
+function useDebouncedValue<T>(value: T, delay = 250) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
 export default function DateFeedScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
-  const route = useRoute() as any;
+  const route = useRoute<any>();
   const flatListRef = useRef<FlatList<DateRow>>(null);
 
   // --- auth/profile ---
@@ -94,13 +130,16 @@ export default function DateFeedScreen() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
 
-  // --- flags (separate to avoid jitter) ---
+  // 🔴 NEW: a one-off "pinned" item (invite claimed) — always shown on top this session
+  const [pinned, setPinned] = useState<DateRow | null>(null);
+
+  // --- flags ---
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchingMore, setFetchingMore] = useState(false);
   const [firstLoadDone, setFirstLoadDone] = useState(false);
   const [rpcError, setRpcError] = useState<string | null>(null);
-  const onEndReachedOkRef = useRef(false); // momentum gate
+  const onEndReachedOkRef = useRef(false);
 
   // --- filters (persisted) ---
   const [filtersLoaded, setFiltersLoaded] = useState(false);
@@ -113,20 +152,17 @@ export default function DateFeedScreen() {
   const [locationName, setLocationName] = useState('');
   const [overrideCoords, setOverrideCoords] = useState<{ lat: number; lng: number } | null>(null);
 
+  // Suggestions state
+  const [sessionToken] = useState<string>(uuidv4());
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [loadingSuggest, setLoadingSuggest] = useState(false);
+  const [openDropdown, setOpenDropdown] = useState(false);
+  const debouncedQuery = useDebouncedValue(locationName, 250);
+  const hasPlaces = useMemo(() => !!GOOGLE_KEY, [GOOGLE_KEY]);
+  const didInitLocationRef = useRef(false);
+
   // --- per-user hidden IDs ---
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
-
-  // --- helpers ---
-  const isPast = (d: DateRow) => {
-    if (!d?.event_date) return false;
-    const dt = new Date(d.event_date);
-    return !Number.isNaN(+dt) && dt < new Date();
-  };
-  const isFull = (d: DateRow) => {
-    const rgc = d.remaining_gender_counts;
-    if (!rgc || typeof rgc !== 'object') return false;
-    return Object.values(rgc).every(v => typeof v === 'number' && v === 0);
-  };
 
   // ----- persistence -----
   const persistFilters = useCallback(async () => {
@@ -155,9 +191,17 @@ export default function DateFeedScreen() {
     if (map.sortBy) setSortBy(map.sortBy as (typeof sortOptions)[number]);
     if (map.dateStateFilter) setDateStateFilter(map.dateStateFilter as (typeof stateOptions)[number]);
     if (map.selectedTypes) setSelectedTypes(JSON.parse(map.selectedTypes));
-    if (map.locationName) setLocationName(map.locationName);
+    if (map.locationName) {
+      setLocationName(map.locationName);
+      didInitLocationRef.current = true;
+    }
     setFiltersLoaded(true);
   }, []);
+
+  // Load filters on mount
+  useEffect(() => {
+    loadFilters();
+  }, [loadFilters]);
 
   // Load hidden IDs when userId known
   const loadHidden = useCallback(async (uid: string) => {
@@ -178,7 +222,7 @@ export default function DateFeedScreen() {
     }
   }, []);
 
-  // ----- geocode -----
+  // ----- geocode helpers -----
   const reverseGeocodeToCity = useCallback(async (lat: number, lng: number) => {
     try {
       const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
@@ -192,7 +236,9 @@ export default function DateFeedScreen() {
     }
   }, []);
 
-  const getCurrentLocation = async () => {
+  const refreshListRef = useRef<null | ((coords?: { lat: number; lng: number }) => Promise<void>)>(null);
+
+  const getCurrentLocation = useCallback(async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
@@ -203,17 +249,13 @@ export default function DateFeedScreen() {
       setOverrideCoords({ lat: coords.latitude, lng: coords.longitude });
       await reverseGeocodeToCity(coords.latitude, coords.longitude);
       await persistFilters();
-      if (userId && profile) refreshList({ lat: coords.latitude, lng: coords.longitude });
+      if (userId && profile) refreshListRef.current?.({ lat: coords.latitude, lng: coords.longitude });
     } catch {
       Alert.alert('Location Error', 'Could not fetch your location.');
     }
-  };
+  }, [persistFilters, profile, reverseGeocodeToCity, userId]);
 
-  // ----- bootstrap filters + session -----
-  useEffect(() => {
-    loadFilters();
-  }, [loadFilters]);
-
+  // ----- session/profile hydrate (single-init location) -----
   const hydrateSession = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
 
@@ -221,6 +263,7 @@ export default function DateFeedScreen() {
       setUserId(null);
       setProfile(null);
       setDates([]);
+      setPinned(null); // clear any session pin
       setHiddenIds(new Set());
       setLoadingInitial(false);
       setRefreshing(false);
@@ -231,24 +274,28 @@ export default function DateFeedScreen() {
 
     const uid = session.user.id as UUID;
     setUserId(uid);
-
-    // load hidden for this user
     loadHidden(uid);
 
     const { data: prof } = await supabase
       .from('profiles')
-      .select('id, gender, orientation, latitude, longitude, location')
+      .select('id, gender, orientation, latitude, longitude, location, profile_photo')
       .eq('id', uid)
       .single();
 
     if (prof) {
       setProfile(prof as Profile);
-      if (!locationName && prof.location) setLocationName(prof.location);
-      if (!locationName && prof.latitude != null && prof.longitude != null) {
-        reverseGeocodeToCity(prof.latitude, prof.longitude);
+      if (!didInitLocationRef.current) {
+        if ((prof as Profile).location) {
+          setLocationName((prof as Profile).location as string);
+          await AsyncStorage.setItem('locationName', (prof as Profile).location as string);
+          didInitLocationRef.current = true;
+        } else if ((prof as Profile).latitude != null && (prof as Profile).longitude != null) {
+          await reverseGeocodeToCity((prof as Profile).latitude!, (prof as Profile).longitude!);
+          didInitLocationRef.current = true;
+        }
       }
     }
-  }, [locationName, reverseGeocodeToCity, loadHidden]);
+  }, [loadHidden, reverseGeocodeToCity]);
 
   useEffect(() => {
     hydrateSession();
@@ -256,13 +303,13 @@ export default function DateFeedScreen() {
 
   // Re-hydrate on auth state changes
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, _s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
       hydrateSession();
     });
     return () => sub.subscription?.unsubscribe();
   }, [hydrateSession]);
 
-  // ======= FaceID / TouchID first-arrival prompt =======
+  // ======= FaceID / TouchID prompt on first arrival =======
   useEffect(() => {
     (async () => {
       const didPrompt = await tryPromptIfArmed(async (refresh_token) => {
@@ -270,57 +317,328 @@ export default function DateFeedScreen() {
       });
       if (didPrompt) {
         await hydrateSession();
-        await refreshList();
+        await refreshListRef.current?.();
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ======= FETCHING (stable flags) =======
+  // ======= FETCHING =======
   const canQuery = useMemo(() => !!userId && !!profile, [userId, profile]);
 
+  const isPast = (d: DateRow) => {
+    if (!d?.event_date) return false;
+    const dt = new Date(d.event_date);
+    return !Number.isNaN(+dt) && dt < new Date();
+  };
+  const isFull = (d: DateRow) => {
+    const rgc = d.remaining_gender_counts;
+    if (!rgc || typeof rgc !== 'object') return false;
+    const vals = Object.values(rgc).filter(v => typeof v === 'number');
+    if (vals.length === 0) return false;
+    return vals.every(v => v === 0);
+  };
+
+  // derive viewer's gender (not used for filtering anymore, but we keep it if needed later)
+  const getViewerGender = useCallback(() => {
+    const g = (profile?.gender ?? profile?.orientation ?? '').toString().trim();
+    return g ? g.toLowerCase() : '';
+  }, [profile]);
+
+  /** Helper: fetch a single date (robustly) and map to DateRow (same as feed rows). */
+  const fetchSingleDateRow = useCallback(async (dateId: string): Promise<DateRow | null> => {
+    // (a) try v2
+    let base: any | null = null;
+    try {
+      const { data, error } = await supabase
+        .from('vw_feed_dates_v2')
+        .select(`
+          id, creator, event_type, event_date, location, created_at,
+          accepted_users, orientation_preference, spots, remaining_gender_counts,
+          photo_urls, profile_photo, date_cover, creator_photo
+        `)
+        .eq('id', dateId)
+        .limit(1);
+      if (!error && Array.isArray(data) && data.length) base = data[0];
+    } catch {/* ignore */}
+
+    // (b) v1
+    if (!base) {
+      try {
+        const { data, error } = await supabase
+          .from('vw_feed_dates')
+          .select(`
+            id, creator, event_type, event_date, location, created_at,
+            accepted_users, orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `)
+          .eq('id', dateId)
+          .limit(1);
+        if (!error && Array.isArray(data) && data.length) base = data[0];
+      } catch {/* ignore */}
+    }
+
+    // (c) fallback from source tables
+    if (!base) {
+      try {
+        const { data } = await supabase
+          .from('date_requests')
+          .select(`
+            id, creator, event_type, event_date, location, created_at,
+            orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `)
+          .eq('id', dateId)
+          .limit(1);
+        if (Array.isArray(data) && data.length) base = data[0];
+      } catch {/* ignore */}
+    }
+    if (!base) {
+      try {
+        const { data } = await supabase
+          .from('dates')
+          .select(`
+            id, creator, event_type, event_date, location, created_at,
+            orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `)
+          .eq('id', dateId)
+          .limit(1);
+        if (Array.isArray(data) && data.length) base = data[0];
+      } catch {/* ignore */}
+    }
+    if (!base) return null;
+
+    // Enrich: who_pays + profiles
+    let whoPays: string | null = null;
+    try {
+      const { data } = await supabase.from('date_requests').select('id, who_pays').eq('id', dateId).limit(1);
+      if (Array.isArray(data) && data.length) whoPays = (data[0] as any).who_pays ?? null;
+    } catch {/* ignore */}
+    if (whoPays == null) {
+      try {
+        const { data } = await supabase.from('dates').select('id, who_pays').eq('id', dateId).limit(1);
+        if (Array.isArray(data) && data.length) whoPays = (data[0] as any).who_pays ?? null;
+      } catch {/* ignore */}
+    }
+
+    const creatorId = base.creator as string | undefined;
+    const accIds: string[] = Array.isArray(base.accepted_users) ? base.accepted_users : [];
+
+    let creator_profile: ProfileHydrated | null = null;
+    const acceptedMap = new Map<string, ProfileHydrated>();
+
+    const toSelect = 'id, screenname, birthdate, gender, orientation, profile_photo, location, preferences';
+    try {
+      if (creatorId) {
+        const { data } = await supabase.from('profiles').select(toSelect).in('id', [creatorId]);
+        if (Array.isArray(data) && data.length) creator_profile = data[0] as any;
+      }
+      if (accIds.length) {
+        const { data } = await supabase.from('profiles').select(toSelect).in('id', accIds);
+        (data || []).forEach((p: any) => acceptedMap.set(p.id, p as ProfileHydrated));
+      }
+    } catch {/* ignore */}
+
+    const cleanLoc = !looksLikeWKTOrHex(base.location)
+      ? base.location
+      : (creator_profile?.location ?? null);
+
+    const cover: string | null =
+      base.date_cover ||
+      (Array.isArray(base.photo_urls) && base.photo_urls[0]) ||
+      base.profile_photo ||
+      base.creator_photo ||
+      creator_profile?.profile_photo ||
+      null;
+
+    const photo_urls: string[] =
+      Array.isArray(base.photo_urls) && base.photo_urls.length ? base.photo_urls : (cover ? [cover] : []);
+
+    const accepted_profiles: ProfileHydrated[] | null =
+      accIds.length ? accIds.map((id) => acceptedMap.get(id)).filter(Boolean) as ProfileHydrated[] : null;
+
+    return {
+      id: base.id,
+      title: base.title ?? base.event_type ?? null,
+      event_date: base.event_date ?? null,
+      who_pays: whoPays ?? null,
+      event_type: base.event_type ?? null,
+      orientation_preference: Array.isArray(base.orientation_preference) ? base.orientation_preference : null,
+      distance_miles: null,
+      profile_photo: creator_profile?.profile_photo ?? base.profile_photo ?? null,
+      photo_urls,
+      creator_id: base.creator,
+      creator_profile,
+      accepted_profiles,
+      created_at: base.created_at ?? null,
+      latitude: null,
+      longitude: null,
+      location: cleanLoc,
+      spots: base.spots ?? null,
+      remaining_gender_counts: base.remaining_gender_counts ?? null,
+    } as DateRow;
+  }, []);
+
+  /**
+   * Try v2 view first (richer fields), fall back to v1 if unavailable or if any unknown-column error occurs.
+   * Then enrich rows with creator/accepted profiles + who_pays from source table.
+   */
   const fetchPage = useCallback(
-    async (pageArg: number, coords?: { lat: number; lng: number }) => {
+    async (pageArg: number, _coords?: { lat: number; lng: number }) => {
       if (!canQuery) return { rows: [] as DateRow[], pageUsed: pageArg };
 
-      const coordsToUse = coords ?? overrideCoords ?? {
-        lat: profile!.latitude ?? 0,
-        lng: profile!.longitude ?? 0,
-      };
+      const rangeFrom = (pageArg - 1) * PAGE_SIZE;
+      const rangeTo = rangeFrom + PAGE_SIZE - 1;
+      const nowIso = new Date().toISOString();
 
-      const { data, error } = await supabase.rpc('get_date_cards_for_user_paginated', {
-        viewer_id: userId,
-        viewer_gender: profile!.gender,
-        viewer_orientation: profile!.orientation,
-        viewer_lat: coordsToUse.lat,
-        viewer_lng: coordsToUse.lng,
-        page: pageArg,
-        page_size: PAGE_SIZE,
+      // 1) Attempt v2
+      let base: any[] = [];
+      let usedV2 = false;
+      try {
+        const { data, error } = await supabase
+          .from('vw_feed_dates_v2')
+          .select(`
+            id, creator, event_type, event_date, location, created_at,
+            accepted_users, orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo,
+            date_cover, creator_photo, accepted_profile_photos
+          `)
+          .gte('event_date', nowIso)
+          .neq('creator', userId!)
+          .order('event_date', { ascending: true })
+          .range(rangeFrom, rangeTo);
+
+        if (error) throw error;
+        base = data ?? [];
+        usedV2 = true;
+      } catch {
+        // 2) Fallback to v1
+        const { data, error } = await supabase
+          .from('vw_feed_dates')
+          .select(`
+            id, creator, event_type, event_date, location, created_at,
+            accepted_users, orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `)
+          .gte('event_date', nowIso)
+          .neq('creator', userId!)
+          .order('event_date', { ascending: true })
+          .range(rangeFrom, rangeTo);
+
+        if (error) throw error;
+        base = data ?? [];
+        usedV2 = false;
+      }
+
+      if (!base.length) {
+        return { rows: [], pageUsed: pageArg };
+      }
+
+      // Collect ids for enrichment
+      const dateIds: string[] = base.map(r => r.id).filter(Boolean);
+      const creatorIds = Array.from(new Set(base.map(r => r.creator))).filter(Boolean);
+      const acceptedIds = Array.from(
+        new Set(
+          base.flatMap(r =>
+            Array.isArray(r.accepted_users) ? r.accepted_users : []
+          )
+        )
+      ).filter(Boolean);
+
+      // 3) Enrich with creator profiles
+      let creatorsById = new Map<string, ProfileHydrated>();
+      if (creatorIds.length) {
+        const { data: creators, error: cErr } = await supabase
+          .from('profiles')
+          .select('id, screenname, birthdate, gender, orientation, profile_photo, location, preferences')
+          .in('id', creatorIds);
+        if (!cErr && creators) {
+          creatorsById = new Map((creators as ProfileHydrated[]).map((p) => [p.id, p]));
+        }
+      }
+
+      // 4) Enrich with accepted profiles
+      let acceptedById = new Map<string, ProfileHydrated>();
+      if (acceptedIds.length) {
+        const { data: accs, error: aErr } = await supabase
+          .from('profiles')
+          .select('id, screenname, birthdate, gender, orientation, profile_photo, location, preferences')
+          .in('id', acceptedIds);
+        if (!aErr && accs) {
+          acceptedById = new Map((accs as ProfileHydrated[]).map((p) => [p.id, p]));
+        }
+      }
+
+      // 5) who_pays
+      let whoPaysById = new Map<string, string | null>();
+      if (dateIds.length) {
+        const { data: meta } = await supabase
+          .from('date_requests')
+          .select('id, who_pays')
+          .in('id', dateIds);
+        if (meta?.length) {
+          whoPaysById = new Map(meta.map((r: any) => [r.id, r.who_pays ?? null]));
+        }
+      }
+
+      // 6) Map to DateRow
+      const mapped: DateRow[] = base.map((r: any) => {
+        const creator_profile = creatorsById.get(r.creator) ?? null;
+
+        const cleanLoc = !looksLikeWKTOrHex(r.location)
+          ? r.location
+          : (creator_profile?.location ?? null);
+
+        const cover: string | null = usedV2
+          ? (r.date_cover ||
+             (Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
+             r.profile_photo ||
+             r.creator_photo ||
+             creator_profile?.profile_photo ||
+             null)
+          : ((Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
+             r.profile_photo ||
+             creator_profile?.profile_photo ||
+             null);
+
+        const photo_urls: string[] =
+          Array.isArray(r.photo_urls) && r.photo_urls.length
+            ? r.photo_urls
+            : (cover ? [cover] : []);
+
+        const accepted_profiles: ProfileHydrated[] | null = Array.isArray(r.accepted_users)
+          ? r.accepted_users.map((uid: string) => acceptedById.get(uid)).filter(Boolean) as ProfileHydrated[]
+          : null;
+
+        return {
+          id: r.id,
+          title: r.title ?? r.event_type ?? null,
+          event_date: r.event_date ?? null,
+          who_pays: whoPaysById.get(r.id) ?? null,
+          event_type: r.event_type ?? null,
+          orientation_preference: Array.isArray(r.orientation_preference) ? r.orientation_preference : null,
+          distance_miles: null,
+          profile_photo: creator_profile?.profile_photo ?? r.profile_photo ?? null,
+          photo_urls,
+          creator_id: r.creator,
+          creator_profile,
+          accepted_profiles,
+          created_at: r.created_at ?? null,
+          latitude: null,
+          longitude: null,
+          location: cleanLoc,
+          spots: r.spots ?? null,
+          remaining_gender_counts: r.remaining_gender_counts ?? null,
+        };
       });
 
-      if (error) throw error;
-
-      const baseRows = (data ?? []) as DateRow[];
-
-      // sanitize locations (show city name, not WKT/hex), then filter/sort
-      const rows = baseRows.map((d) => {
-        const cleanLoc = !looksLikeWKTOrHex(d.location)
-          ? d.location
-          : (d?.creator_profile?.location ?? '');
-        return { ...d, location: cleanLoc };
-      });
-
-      const filtered = rows.filter((d) => {
-        // hide if user marked Not Interested
+      // 7) Client filters
+      const filtered = mapped.filter((d) => {
         if (hiddenIds.has(String(d.id))) return false;
 
         const past = isPast(d);
         const full = isFull(d);
-
-        const orientationMatch = Array.isArray(d.orientation_preference)
-          ? d.orientation_preference.includes(profile!.orientation) ||
-            d.orientation_preference.includes('Everyone')
-          : true;
 
         const typeMatch =
           d.spots == null
@@ -339,7 +657,7 @@ export default function DateFeedScreen() {
           (typeof d.location === 'string' &&
             d.location.toLowerCase().includes(filterText.toLowerCase()));
 
-        if (!orientationMatch || !typeMatch || !withinRadius || !locationMatch) return false;
+        if (!typeMatch || !withinRadius || !locationMatch) return false;
 
         if (dateStateFilter === 'Available Dates' && full) return false;
         if (dateStateFilter === 'Filled Dates' && !full) return false;
@@ -348,6 +666,7 @@ export default function DateFeedScreen() {
         return true;
       });
 
+      // 8) Sort
       const sorted = [...filtered].sort((a, b) => {
         const aDate = a.event_date ? +new Date(a.event_date) : 0;
         const bDate = b.event_date ? +new Date(b.event_date) : 0;
@@ -362,25 +681,29 @@ export default function DateFeedScreen() {
         return 0;
       });
 
+      if (__DEV__) {
+        console.debug(`[DateFeed] fetched=${base.length} afterFilters=${sorted.length}`);
+      }
       return { rows: sorted, pageUsed: pageArg };
     },
-    [canQuery, userId, profile, overrideCoords, radius, filterText, sortBy, dateStateFilter, selectedTypes, hiddenIds]
+    [canQuery, userId, profile, radius, filterText, sortBy, dateStateFilter, selectedTypes, hiddenIds, getViewerGender]
   );
 
   const refreshList = useCallback(
-    async (coordsOverride?: { lat: number; lng: number }) => {
+    async (_coordsOverride?: { lat: number; lng: number }) => {
       if (!canQuery) return;
       try {
+        onEndReachedOkRef.current = false;
         setRefreshing(true);
         setRpcError(null);
-        const { rows } = await fetchPage(1, coordsOverride);
+        const { rows } = await fetchPage(1);
         setDates(rows);
         setPage(2);
         setHasMore(rows.length === PAGE_SIZE);
         setFirstLoadDone(true);
-      } catch (e) {
-        console.error('[DateFeed] refresh error', e);
-        setRpcError('We had trouble loading dates. Please pull to refresh again.');
+      } catch (e: any) {
+        console.error('[DateFeed] refresh error', e?.message || e);
+        setRpcError('We had trouble loading dates. Pull to refresh to try again.');
       } finally {
         setLoadingInitial(false);
         setRefreshing(false);
@@ -389,6 +712,7 @@ export default function DateFeedScreen() {
     },
     [canQuery, fetchPage]
   );
+  useEffect(() => { refreshListRef.current = refreshList; }, [refreshList]);
 
   const loadMore = useCallback(async () => {
     if (!canQuery || fetchingMore || !hasMore) return;
@@ -396,13 +720,10 @@ export default function DateFeedScreen() {
       setFetchingMore(true);
       const { rows } = await fetchPage(page);
       setDates(prev => [...prev, ...rows]);
-      if (rows.length === PAGE_SIZE) {
-        setPage(prev => prev + 1);
-      } else {
-        setHasMore(false);
-      }
+      if (rows.length === PAGE_SIZE) setPage(prev => prev + 1);
+      else setHasMore(false);
     } catch (e) {
-      console.error('[DateFeed] loadMore error', e);
+      console.error('[DateFeed] loadMore error]', e);
     } finally {
       setFetchingMore(false);
     }
@@ -428,114 +749,261 @@ export default function DateFeedScreen() {
     }, [userId, profile, refreshList])
   );
 
-  // optional scroll-to-card
-  useEffect(() => {
-    if (route.params?.scrollToDateId && dates.length > 0 && flatListRef.current) {
-      const index = dates.findIndex((d) => d.id === route.params.scrollToDateId);
-      if (index !== -1) flatListRef.current.scrollToIndex({ index, animated: true });
-    }
-  }, [route.params?.scrollToDateId, dates]);
-
-  // ======= Not Interested handler (per-user hide) =======
+  // ===== Not Interested handler (also clears pinned if it matches) =====
   const onNotInterested = useCallback(async (dateId: string) => {
     if (!userId) return;
-
-    // Optimistic local hide
+    setPinned((p) => (p?.id && String(p.id) === String(dateId) ? null : p));
     setDates(prev => prev.filter(d => String(d.id) !== String(dateId)));
     const next = new Set(hiddenIds);
     next.add(String(dateId));
     setHiddenIds(next);
     saveHidden(userId, next);
-
-    // Optional: server persistence (ignore error if table doesn't exist)
-    // Expecting a table like: user_hidden_dates(user_id uuid, date_id uuid, primary key (user_id, date_id))
     try {
-      await supabase.from('user_hidden_dates').upsert(
+      const { error } = await supabase.from('user_hidden_dates').upsert(
         { user_id: userId, date_id: dateId },
         { onConflict: 'user_id,date_id' }
       );
-    } catch {
-      // ignore – local persistence is enough
+      if (error) console.warn('[NotInterested] upsert warning:', error);
+    } catch (err) {
+      console.warn('[NotInterested] upsert failed:', err);
     }
   }, [userId, hiddenIds, saveHidden]);
 
-  // --------- Header (filters) ---------
-  const ListHeader = useMemo(() => (
-    <View>
-      <TouchableOpacity onPress={() => setShowFilters((s) => !s)}>
-        <Text style={styles.toggle}>{showFilters ? 'Hide Filters ▲' : 'Show Filters ▼'}</Text>
+  // ===== Invite consumption → PIN & SCROLL immediately =====
+  const handledInviteRef = useRef(false);
+  const ensurePinnedVisible = useCallback(async (dateId: string) => {
+    // If already in the list, lift to the top; otherwise fetch and inject
+    let row = dates.find((d) => String(d.id) === String(dateId)) || null;
+    if (!row) row = await fetchSingleDateRow(String(dateId));
+    if (!row) return;
+
+    setPinned(row);
+    setDates((prev) => [row!, ...prev.filter((d) => String(d.id) !== String(row!.id))]);
+
+    // Scroll to top so the user sees it "pop"
+    setTimeout(() => {
+      try { flatListRef.current?.scrollToIndex({ index: 0, animated: true }); } catch {}
+    }, 120);
+  }, [dates, fetchSingleDateRow]);
+
+  useEffect(() => {
+    if (!userId || !profile || handledInviteRef.current) return;
+    handledInviteRef.current = true;
+    (async () => {
+      try {
+        const res = await consumePendingInviteAfterLogin(); // creates join_request if needed
+        const dateId = res?.date_id || res?.dateId || (res as any)?.date?.id;
+        if (dateId) await ensurePinnedVisible(String(dateId));
+      } catch (e) {
+        // harmless if service not available or nothing pending
+      }
+    })();
+  }, [userId, profile, ensurePinnedVisible]);
+
+  // ===== Places autocomplete =====
+  const debouncedQuery = useDebouncedValue(locationName, 250);
+  useEffect(() => {
+    const q = debouncedQuery?.trim();
+    if (!hasPlaces) { setSuggestions([]); setOpenDropdown(false); return; }
+    if (!q || q.length < 3) { setSuggestions([]); setOpenDropdown(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoadingSuggest(true);
+        const url =
+          `${AUTOCOMPLETE_ENDPOINT}?input=${encodeURIComponent(q)}&types=(cities)&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (cancelled) return;
+
+        if (json?.status === 'OK' && Array.isArray(json?.predictions)) {
+          const items: Suggestion[] = json.predictions.map((p: any) => ({
+            description: p.description,
+            place_id: p.place_id,
+          }));
+          setSuggestions(items);
+          setOpenDropdown(items.length > 0);
+        } else {
+          setSuggestions([]);
+          setOpenDropdown(false);
+        }
+      } catch {
+        setSuggestions([]);
+        setOpenDropdown(false);
+      } finally {
+        if (!cancelled) setLoadingSuggest(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [debouncedQuery, sessionToken, hasPlaces]);
+
+  const resolvePlaceDetails = useCallback(async (place_id: string, label: string) => {
+    if (!hasPlaces) return;
+    try {
+      const url = `${DETAILS_ENDPOINT}?place_id=${encodeURIComponent(place_id)}&fields=geometry,name&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json?.status === 'OK' && json?.result?.geometry?.location) {
+        const { lat, lng } = json.result.geometry.location;
+        setOverrideCoords({ lat, lng });
+        setLocationName(label);
+        await AsyncStorage.setItem('locationName', label);
+        await persistFilters();
+        if (userId && profile) refreshListRef.current?.({ lat, lng });
+      }
+    } catch {
+      // ignore
+    }
+  }, [persistFilters, profile, sessionToken, hasPlaces, userId]);
+
+  // ===== Robust navigation helper for the New Date footer tab =====
+  const goToCreateDateTab = useCallback(() => {
+    const looksLikeCreateTab = (name: string) => {
+      const n = name.toLowerCase().replace(/[\s_-]/g, '');
+      return ['newdate', 'createdate', 'new', 'create', 'createdatetab', 'newdatetab'].includes(n);
+    };
+    let nav: any = navigation;
+    for (let i = 0; i < 5 && nav; i++) {
+      const state = nav?.getState?.();
+      const routeNames: string[] = Array.isArray(state?.routeNames) ? state.routeNames : [];
+      const match = routeNames.find(looksLikeCreateTab);
+      if (match) {
+        try { nav.navigate(match as never); return; } catch {}
+        try { nav.navigate(match as never, { screen: 'CreateDateScreen' } as never); return; } catch {}
+      }
+      nav = nav?.getParent?.();
+    }
+    const FALLBACKS = [
+      { name: 'New Date' }, { name: 'NewDate' }, { name: 'CreateDate' },
+      { name: 'Create Date' }, { name: 'NewDateTab' }, { name: 'CreateDateTab' },
+      { name: 'CreateDateScreen' },
+    ];
+    for (const f of FALLBACKS) {
+      try { navigation.dispatch(CommonActions.navigate({ name: f.name as any })); return; } catch {}
+      try { navigation.navigate(f.name as never); return; } catch {}
+    }
+  }, [navigation]);
+
+  // ===== Header Filters =====
+  const FiltersPanel = (
+    <View style={[styles.filterPanelOuter, { paddingTop: insets.top + 6 }]}>
+      <TouchableOpacity
+        onPress={() => { Keyboard.dismiss(); setShowFilters((s) => !s); }}
+        activeOpacity={0.8}
+        style={styles.filterToggle}
+      >
+        <Text style={styles.toggle}>
+          {showFilters ? 'Hide Filters ▲' : 'Show Filters ▼'}
+        </Text>
       </TouchableOpacity>
 
       {showFilters && (
         <View style={styles.filterPanel}>
-          {/* Location row */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Text style={styles.label}>📍 Location</Text>
-            <TouchableOpacity onPress={getCurrentLocation}>
-              <Text style={{ fontSize: 20 }}>📍</Text>
-            </TouchableOpacity>
-          </View>
+          {/* Location */}
+          <Text style={styles.label}>📍 Location</Text>
 
-          {/* City input */}
-          <View style={{ zIndex: 1000, marginBottom: 12 }}>
-            <CustomLocationInput
+          {/* Use My Current Location */}
+          <TouchableOpacity style={styles.currentLocBtn} onPress={getCurrentLocation} activeOpacity={0.9}>
+            <Text style={styles.currentLocText}>Use My Current Location</Text>
+          </TouchableOpacity>
+
+          {/* City input + dropdown */}
+          <View style={{ position: 'relative', zIndex: 50, marginTop: 8 }}>
+            <TextInput
+              style={styles.input}
+              placeholder="Enter city (e.g., Santa Monica)"
               value={locationName}
-              onLocationSelect={async ({ name, latitude, longitude }) => {
-                setFilterText(name || '');
-                setLocationName(name || '');
-                setOverrideCoords({ lat: latitude, lng: longitude });
-                await persistFilters();
-                if (userId && profile) refreshList({ lat: latitude, lng: longitude });
+              onChangeText={(t) => {
+                setLocationName(t);
+                if (t.trim().length >= 3) setOpenDropdown(true);
+                if (t.trim().length === 0) {
+                  setSuggestions([]); setOpenDropdown(false); setOverrideCoords(null);
+                }
               }}
+              placeholderTextColor="#8A94A6"
+              onFocus={() => { if (suggestions.length > 0) setOpenDropdown(true); }}
+              onBlur={() => setTimeout(() => setOpenDropdown(false), 100)}
+              returnKeyType="done"
+              autoCapitalize="words"
+              autoCorrect={false}
             />
+
+            {/* Autocomplete dropdown */}
+            {openDropdown && (
+              <View style={styles.dropdown}>
+                {loadingSuggest ? (
+                  <View style={styles.dropdownItem}>
+                    <ActivityIndicator />
+                    <Text style={{ marginLeft: 8, color: '#6b7280' }}>Searching cities…</Text>
+                  </View>
+                ) : suggestions.length === 0 ? (
+                  <View style={styles.dropdownItem}>
+                    <Text style={{ color: '#6b7280' }}>No matches</Text>
+                  </View>
+                ) : (
+                  <FlatList
+                    keyboardShouldPersistTaps="handled"
+                    data={suggestions}
+                    keyExtractor={(item) => item.place_id}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        style={styles.dropdownItem}
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          setOpenDropdown(false); setSuggestions([]);
+                          resolvePlaceDetails(item.place_id, item.description);
+                        }}
+                      >
+                        <Text style={{ color: '#111827' }}>{item.description}</Text>
+                      </TouchableOpacity>
+                    )}
+                    ItemSeparatorComponent={() => <View style={styles.separator} />}
+                  />
+                )}
+              </View>
+            )}
           </View>
 
           {/* Distance */}
-          <Text style={styles.label}>📏 Distance (miles)</Text>
-          <FlatList
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            data={['10', '25', '50', '100', '150', '250', 'Nationwide', 'All']}
-            keyExtractor={(item) => item}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                onPress={async () => {
-                  setRadius(item);
-                  await persistFilters();
-                  refreshList();
-                }}
-                style={[styles.chip, radius === item && styles.chipActive]}
-              >
-                <Text style={radius === item ? styles.chipTextActive : styles.chipText}>
-                  {item}{item.match(/^\d+$/) ? ' mi' : ''}
-                </Text>
-              </TouchableOpacity>
-            )}
-          />
+          <Text style={[styles.label, { marginTop: 12 }]}>📏 Distance</Text>
+          <View style={styles.chipRowWrap}>
+            {['10', '25', '50', '100', '150', '250', 'Nationwide', 'All'].map((item) => {
+              const active = radius === item;
+              return (
+                <TouchableOpacity
+                  key={item}
+                  onPress={async () => { setRadius(item); await persistFilters(); refreshList(); }}
+                  style={[styles.chip, active && styles.chipActive]}
+                  activeOpacity={0.85}
+                >
+                  <Text style={active ? styles.chipTextActive : styles.chipText}>
+                    {item}{/^\d+$/.test(item) ? ' mi' : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
           {/* Status */}
-          <Text style={[styles.label, { marginTop: 12 }]}>Date Status</Text>
-          <View style={styles.chipRow}>
-            {stateOptions.map((opt) => (
-              <TouchableOpacity
-                key={opt}
-                onPress={async () => {
-                  setDateStateFilter(opt);
-                  await persistFilters();
-                  refreshList();
-                }}
-                style={[styles.chip, dateStateFilter === opt && styles.chipActive]}
-              >
-                <Text style={dateStateFilter === opt ? styles.chipTextActive : styles.chipText}>
-                  {opt}
-                </Text>
-              </TouchableOpacity>
-            ))}
+          <Text style={[styles.label, { marginTop: 12 }]}>Status</Text>
+          <View style={styles.chipRowWrap}>
+            {stateOptions.map((opt) => {
+              const active = dateStateFilter === opt;
+              return (
+                <TouchableOpacity
+                  key={opt}
+                  onPress={async () => { setDateStateFilter(opt); await persistFilters(); refreshList(); }}
+                  style={[styles.chip, active && styles.chipActive]}
+                >
+                  <Text style={active ? styles.chipTextActive : styles.chipText}>{opt}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
           {/* Type */}
-          <Text style={[styles.label, { marginTop: 12 }]}>Date Type</Text>
-          <View style={styles.chipRow}>
+          <Text style={[styles.label, { marginTop: 12 }]}>Type</Text>
+          <View style={styles.chipRowWrap}>
             {typeOptions.map((opt) => {
               const active = selectedTypes.includes(opt);
               return (
@@ -543,9 +1011,7 @@ export default function DateFeedScreen() {
                   key={opt}
                   onPress={async () => {
                     const next = active ? selectedTypes.filter(t => t !== opt) : [...selectedTypes, opt];
-                    setSelectedTypes(next);
-                    await persistFilters();
-                    refreshList();
+                    setSelectedTypes(next); await persistFilters(); refreshList();
                   }}
                   style={[styles.chip, active && styles.chipActive]}
                 >
@@ -557,17 +1023,13 @@ export default function DateFeedScreen() {
 
           {/* Sort */}
           <Text style={[styles.label, { marginTop: 12 }]}>Sort By</Text>
-          <View style={styles.chipRow}>
+          <View style={styles.chipRowWrap}>
             {sortOptions.map((opt) => {
               const active = sortBy === opt;
               return (
                 <TouchableOpacity
                   key={opt}
-                  onPress={async () => {
-                    setSortBy(opt);
-                    await persistFilters();
-                    refreshList();
-                  }}
+                  onPress={async () => { setSortBy(opt); await persistFilters(); refreshList(); }}
                   style={[styles.chip, active && styles.chipActive]}
                 >
                   <Text style={active ? styles.chipTextActive : styles.chipText}>{opt}</Text>
@@ -578,166 +1040,166 @@ export default function DateFeedScreen() {
         </View>
       )}
     </View>
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [showFilters, locationName, radius, dateStateFilter, selectedTypes, sortBy, userId, profile]);
+  );
 
-  // --------- Footer ---------
+  // ===== List footer =====
   const ListFooter = useMemo(() => {
     if (fetchingMore) {
-      return (
-        <View style={{ paddingVertical: 12 }}>
-          <ActivityIndicator />
-        </View>
-      );
+      return (<View style={{ paddingVertical: 12 }}><ActivityIndicator /></View>);
     }
     if (!hasMore && dates.length > 0) {
-      return (
-        <View>
-          <Text style={{ textAlign: 'center', padding: 12, color: 'gray' }}>No more results</Text>
-        </View>
-      );
+      return (<View><Text style={{ textAlign: 'center', padding: 12, color: 'gray' }}>No more results</Text></View>);
     }
     return null;
   }, [fetchingMore, hasMore, dates.length]);
 
-  // ===== Navigation helpers (used by DateCard) =====
-  const openProfile = (creatorId: string) => {
-    navigation.navigate('PublicProfile' as never, { userId: creatorId, origin: 'DateFeed' } as never);
-  };
-  const openDateDetails = (dateId: string) => {
-    navigation.navigate('DateDetails' as never, { dateId } as never);
-  };
+  // ===== Deep-link scroll (param) =====
+  const lastHandledIdRef = useRef<string | undefined>(undefined);
+  const tryScrollToId = useCallback(
+    (id?: string) => {
+      if (!id) return;
+      const full = (pinned ? [pinned, ...dates.filter(d => d.id !== pinned.id)] : dates);
+      if (!full.length) return;
+      if (lastHandledIdRef.current === id) return;
+      const index = full.findIndex((d) => String(d.id) === String(id));
+      if (index !== -1) {
+        flatListRef.current?.scrollToIndex({ index, animated: true });
+        lastHandledIdRef.current = id;
+        if (route.params?.scrollToDateId) navigation.setParams({ scrollToDateId: undefined } as any);
+      }
+    }, [dates, pinned, navigation, route.params]
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const id = route.params?.scrollToDateId;
+      if (!loadingInitial && !refreshing) tryScrollToId(id);
+    }, [route.params?.scrollToDateId, loadingInitial, refreshing, tryScrollToId])
+  );
+
+  // --- Render data (prepend pinned if present) ---
+  const listData = useMemo(
+    () => (pinned ? [pinned, ...dates.filter((d) => d.id !== pinned.id)] : dates),
+    [pinned, dates]
+  );
 
   // --- UI ---
   return (
     <AnimatedScreenWrapper showLogo={false} {...({ style: { backgroundColor: '#FFFFFF' } } as any)}>
-      <View style={{ flex: 1, backgroundColor: '#FFFFFF', paddingTop: insets.top }}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={{ flex: 1, paddingHorizontal: 12, backgroundColor: '#FFFFFF' }}>
-              <FlatList
-                ref={flatListRef}
-                ListHeaderComponent={ListHeader}
-                ListFooterComponent={ListFooter}
-                contentContainerStyle={{ paddingBottom: 24 }}
-                data={dates}
-                keyExtractor={(item) => String(item.id)}
-                renderItem={({ item }) => (
-                  <DateCard
-                    date={item}
-                    userId={userId!}
-                    isCreator={item.creator_id === userId}
-                    isAccepted={false}
-                    disabled={false}
-                    onPressProfile={(pid) => openProfile(pid)}
-                    onPressCard={() => openDateDetails(item.id)}
-                    onNotInterested={() => onNotInterested(String(item.id))}
-                  />
-                )}
-                removeClippedSubviews={false}
-                windowSize={10}
-                initialNumToRender={6}
-                maxToRenderPerBatch={8}
-                updateCellsBatchingPeriod={60}
-                refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => refreshList()} />}
-                onEndReached={() => {
-                  if (!onEndReachedOkRef.current) return;
-                  if (!loadingInitial && !refreshing && hasMore && !fetchingMore) loadMore();
-                }}
-                onEndReachedThreshold={0.4}
-                onMomentumScrollBegin={() => {
-                  onEndReachedOkRef.current = true;
-                }}
-                ListEmptyComponent={
-                  firstLoadDone && !loadingInitial && !refreshing
-                    ? (
-                        <View style={{ width: '100%', alignItems: 'center', padding: 24 }}>
-                          {!userId ? (
-                            <>
-                              <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                                You’re signed out. Log in to see dates.
-                              </Text>
-                              <TouchableOpacity
-                                onPress={() => navigation.navigate('Auth' as never)}
-                                style={{
-                                  backgroundColor: DRYNKS_RED,
-                                  paddingHorizontal: 16,
-                                  paddingVertical: 12,
-                                  borderRadius: 10,
-                                  marginTop: 8,
-                                }}
-                              >
-                                <Text style={{ color: 'white', fontWeight: '600' }}>Log In</Text>
-                              </TouchableOpacity>
-                            </>
-                          ) : rpcError ? (
-                            <>
-                              <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                                {rpcError}
-                              </Text>
-                              <TouchableOpacity
-                                onPress={() => refreshList()}
-                                style={{
-                                  backgroundColor: DRYNKS_RED,
-                                  paddingHorizontal: 16,
-                                  paddingVertical: 12,
-                                  borderRadius: 10,
-                                  marginTop: 8,
-                                }}
-                              >
-                                <Text style={{ color: 'white', fontWeight: '600' }}>Retry</Text>
-                              </TouchableOpacity>
-                            </>
-                          ) : (
-                            <>
-                              <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                                There are no dates nearby — yet. Be a pioneer and create one!
-                                {'\n'}We count on our amazing users to host fun, spontaneous, and meaningful events.
-                                {'\n'}From romantic one-on-one dates, to poker nights with friends, concert adventures, or even a classy yacht party — your invite could spark the next great connection.
-                                {'\n'}Throw a charity gala and need a plus-one? Someone out there is looking to join you.
-                                {'\n'}Be the first. Create your next date.
-                              </Text>
-                              <TouchableOpacity
-                                onPress={() => navigation.navigate('New Date' as never)}
-                                style={{
-                                  backgroundColor: DRYNKS_RED,
-                                  paddingHorizontal: 16,
-                                  paddingVertical: 12,
-                                  borderRadius: 10,
-                                  marginTop: 8,
-                                }}
-                              >
-                                <Text style={{ color: 'white', fontWeight: '600' }}>+ Create Date</Text>
-                              </TouchableOpacity>
-                            </>
-                          )}
-                        </View>
-                      )
-                    : null
-                }
-              />
-            </View>
-          </TouchableWithoutFeedback>
-        </KeyboardAvoidingView>
+      <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
+        {FiltersPanel}
+
+        <FlatList
+          ref={flatListRef}
+          contentContainerStyle={{ paddingBottom: 24, paddingTop: 8 }}
+          data={listData}
+          keyExtractor={(item) => String(item.id)}
+          renderItem={({ item }) => (
+            <DateCard
+              date={item}
+              userId={userId ?? ''}
+              isCreator={item.creator_id === userId}
+              isAccepted={false}
+              disabled={false}
+              onPressProfile={(pid) => navigation.navigate('PublicProfile', { userId: pid, origin: 'DateFeed' } as any)}
+              onPressCard={() => {/* hook for details */}}
+              onNotInterested={() => onNotInterested(String(item.id))}
+            />
+          )}
+          removeClippedSubviews={false}
+          windowSize={10}
+          initialNumToRender={6}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={60}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => refreshList()} />}
+          onEndReached={() => {
+            if (!onEndReachedOkRef.current) return;
+            if (!loadingInitial && !refreshing && hasMore && !fetchingMore) loadMore();
+          }}
+          onEndReachedThreshold={0.4}
+          onMomentumScrollBegin={() => { onEndReachedOkRef.current = true; }}
+          onScrollToIndexFailed={(info) => {
+            setTimeout(() => flatListRef.current?.scrollToIndex({ index: info.index, animated: true }), 250);
+          }}
+          ListFooterComponent={ListFooter}
+          ListEmptyComponent={
+            firstLoadDone && !loadingInitial && !refreshing
+              ? (
+                <View style={{ width: '100%', alignItems: 'center', padding: 24 }}>
+                  {!userId ? (
+                    <>
+                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
+                        You’re signed out. Log in to see dates.
+                      </Text>
+                      <TouchableOpacity onPress={() => navigation.navigate('Login')} style={styles.primaryBtn}>
+                        <Text style={styles.primaryBtnText}>Log In</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : rpcError ? (
+                    <>
+                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
+                        {rpcError}
+                      </Text>
+                      <TouchableOpacity onPress={() => refreshList()} style={styles.primaryBtn}>
+                        <Text style={styles.primaryBtnText}>Retry</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
+                        There are no dates nearby — yet. Be a pioneer and create one!
+                        {'\n'}From one‑on‑one dinners to poker nights, concerts, or a classy yacht party —
+                        your invite could spark the next great connection.
+                      </Text>
+                      <TouchableOpacity onPress={goToCreateDateTab} style={styles.primaryBtn}>
+                        <Text style={styles.primaryBtnText}>+ Create Date</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              ) : null
+          }
+        />
       </View>
     </AnimatedScreenWrapper>
   );
 }
 
 const styles = StyleSheet.create({
-  toggle: { fontSize: 14, fontWeight: '600', color: DRYNKS_RED, marginVertical: 10 },
-  filterPanel: { backgroundColor: DRYNKS_GRAY, padding: 12, borderRadius: 12, marginBottom: 16 },
-  label: { fontSize: 12, fontWeight: '600', marginBottom: 6, color: DRYNKS_BLUE },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8 },
-  chip: {
-    backgroundColor: '#ddd',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginRight: 8,
-    marginBottom: 8,
+  // Filter panel
+  filterPanelOuter: { backgroundColor: '#FFFFFF', paddingHorizontal: 12 },
+  filterToggle: { paddingVertical: 8, alignItems: 'flex-start' },
+  toggle: { fontSize: 14, fontWeight: '600', color: DRYNKS_RED },
+  filterPanel: { backgroundColor: DRYNKS_GRAY, padding: 12, borderRadius: 12, marginTop: 10 },
+  label: { fontSize: 12, fontWeight: '600', marginTop: 4, color: DRYNKS_BLUE },
+
+  currentLocBtn: {
+    marginTop: 6, borderWidth: 1, borderColor: '#DADFE6', backgroundColor: '#fff',
+    borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, alignItems: 'center',
   },
+  currentLocText: { color: DRYNKS_BLUE, fontWeight: '700' },
+
+  // Places dropdown
+  input: {
+    height: 50, borderColor: '#DADFE6', borderWidth: 1, borderRadius: 10,
+    paddingHorizontal: 12, marginTop: 8, fontSize: 16, backgroundColor: '#fff', color: '#1F2A33',
+  },
+  dropdown: {
+    position: 'absolute', top: 58, left: 0, right: 0, backgroundColor: '#fff',
+    borderColor: '#E5E7EB', borderWidth: 1, borderRadius: 10, overflow: 'hidden',
+    zIndex: 1000, maxHeight: 240, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 8, elevation: 3,
+  },
+  dropdownItem: { paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center' },
+  separator: { height: 1, backgroundColor: '#F3F4F6' },
+
+  // Chips
+  chipRowWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 6 },
+  chip: { backgroundColor: '#ddd', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6, marginRight: 8, marginBottom: 8 },
   chipActive: { backgroundColor: DRYNKS_BLUE },
   chipText: { fontSize: 12, color: '#333' },
   chipTextActive: { fontSize: 12, color: '#fff', fontWeight: '600' },
+
+  // Buttons
+  primaryBtn: { backgroundColor: DRYNKS_RED, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, marginTop: 8 },
+  primaryBtnText: { color: 'white', fontWeight: '700' },
 });

@@ -1,6 +1,8 @@
-// MyDatesScreen.tsx — Production Ready (Created & Accepted only, with MyDates actions)
+// src/screens/Dates/MyDatesScreen.tsx
+// MyDatesScreen — Production Ready (compact header, avatar opens ProfileMenu; chips never overlap header)
+// Bell button robustly opens a Notifications screen if it exists; otherwise shows an in‑screen fallback sheet.
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -8,12 +10,20 @@ import {
   FlatList,
   RefreshControl,
   ActivityIndicator,
+  Image,
+  SafeAreaView,
+  StatusBar,
   TouchableOpacity,
+  Modal,
+  Platform,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, CommonActions } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
-import AppShell from '@components/AppShell';
 import DateCard from '@components/cards/DateCard';
+import Chip from '@components/ui/Chip';
+import { Ionicons } from '@expo/vector-icons';
+import ProfileMenu from '@components/common/ProfileMenu';
 
 type UUID = string;
 
@@ -30,7 +40,7 @@ type ProfileLite = {
 type DateRow = {
   id: UUID;
   title: string | null;
-  location: string | null; // may be city or WKT/hex
+  location: string | null;
   event_date: string | null;
   event_type: string | null;
   who_pays: string | null;
@@ -45,13 +55,19 @@ type DateRow = {
 };
 
 const PAGE_SIZE = 20;
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_RED = '#E34E5C';
+const DRYNKS_WHITE = '#FFFFFF';
+
 const looksLikeWKTOrHex = (s?: string | null) =>
   !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(s || ''));
 
 const MyDatesScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
 
   const [userId, setUserId] = useState<UUID | null>(null);
+
   const [tab, setTab] = useState<'created' | 'accepted'>('created');
 
   const [loading, setLoading] = useState(false);
@@ -64,7 +80,15 @@ const MyDatesScreen: React.FC = () => {
   const [createdHasMore, setCreatedHasMore] = useState(true);
   const [acceptedHasMore, setAcceptedHasMore] = useState(true);
 
-  // Bootstrap session
+  // Fallback notifications sheet (opens if no Notifications route exists)
+  const [notifSheetVisible, setNotifSheetVisible] = useState(false);
+
+  // Hide the native header; we render our own compact header
+  useLayoutEffect(() => {
+    navigation.setOptions?.({ headerShown: false });
+  }, [navigation]);
+
+  // Bootstrap session (we only need userId here)
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -129,51 +153,57 @@ const MyDatesScreen: React.FC = () => {
     [fetchProfiles]
   );
 
-  const loadCreated = useCallback(async (page = 1, append = false) => {
-    if (!userId) return;
-    if (!append) setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('date_requests')
-        .select(
-          'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
-        )
-        .eq('creator', userId)
-        .order('event_date', { ascending: false })
-        .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+  const loadCreated = useCallback(
+    async (page = 1, append = false) => {
+      if (!userId) return;
+      if (!append) setLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('date_requests')
+          .select(
+            'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
+          )
+          .eq('creator', userId)
+          .order('event_date', { ascending: false })
+          .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
-      if (error) return;
-      const hydrated = await hydrate((data || []) as DateRow[], userId);
-      setCreated(prev => (append ? [...prev, ...hydrated] : hydrated));
-      setCreatedHasMore((data || []).length === PAGE_SIZE);
-      setCreatedPage(page);
-    } finally {
-      if (!append) setLoading(false);
-    }
-  }, [userId, hydrate]);
+        if (error) return;
+        const hydrated = await hydrate((data || []) as DateRow[], userId);
+        setCreated(prev => (append ? [...prev, ...hydrated] : hydrated));
+        setCreatedHasMore((data || []).length === PAGE_SIZE);
+        setCreatedPage(page);
+      } finally {
+        if (!append) setLoading(false);
+      }
+    },
+    [userId, hydrate]
+  );
 
-  const loadAccepted = useCallback(async (page = 1, append = false) => {
-    if (!userId) return;
-    if (!append) setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('date_requests')
-        .select(
-          'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
-        )
-        .contains('accepted_users', [userId])
-        .order('event_date', { ascending: false })
-        .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+  const loadAccepted = useCallback(
+    async (page = 1, append = false) => {
+      if (!userId) return;
+      if (!append) setLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('date_requests')
+          .select(
+            'id, title, location, event_date, event_type, who_pays, orientation_preference, profile_photo, photo_urls, creator, accepted_users, spots, preferred_gender_counts, remaining_gender_counts'
+          )
+          .contains('accepted_users', [userId])
+          .order('event_date', { ascending: false })
+          .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
-      if (error) return;
-      const hydrated = await hydrate((data || []) as DateRow[], userId);
-      setAccepted(prev => (append ? [...prev, ...hydrated] : hydrated));
-      setAcceptedHasMore((data || []).length === PAGE_SIZE);
-      setAcceptedPage(page);
-    } finally {
-      if (!append) setLoading(false);
-    }
-  }, [userId, hydrate]);
+        if (error) return;
+        const hydrated = await hydrate((data || []) as DateRow[], userId);
+        setAccepted(prev => (append ? [...prev, ...hydrated] : hydrated));
+        setAcceptedHasMore((data || []).length === PAGE_SIZE);
+        setAcceptedPage(page);
+      } finally {
+        if (!append) setLoading(false);
+      }
+    },
+    [userId, hydrate]
+  );
 
   // Initial load per tab
   useEffect(() => {
@@ -191,125 +221,244 @@ const MyDatesScreen: React.FC = () => {
 
   const data = tab === 'created' ? created : accepted;
 
+  // ---------- Header sizes ----------
+  const HEADER_BAR_HEIGHT = 48; // touch-friendly
+  const HEADER_H = insets.top + HEADER_BAR_HEIGHT;
+
+  // ---------- Navigation helpers ----------
+  const smartNavigate = useCallback(
+    (names: string[], params?: any) => {
+      let nav: any = navigation;
+      for (let level = 0; level < 5 && nav; level++) {
+        const state = nav?.getState?.();
+        const routeNames: string[] = Array.isArray(state?.routeNames) ? state.routeNames : [];
+        const name = names.find(n => routeNames.includes(n));
+        if (name) {
+          try { nav.navigate(name as never, params as never); return true; } catch {}
+        }
+        nav = nav?.getParent?.();
+      }
+      try {
+        navigation.dispatch(
+          CommonActions.navigate({ name: 'App' as never, params: { screen: names[0], params } as never })
+        );
+        return true;
+      } catch {}
+      return false;
+    },
+    [navigation]
+  );
+
+  const openNotifications = useCallback(() => {
+    const ok = smartNavigate(
+      ['Notifications', 'NotificationsScreen', 'NotificationCenter', 'Alerts', 'Activity', 'Inbox']
+    );
+    if (!ok) setNotifSheetVisible(true);
+  }, [smartNavigate]);
+
+  const goToReceivedInvites = useCallback(() => {
+    const ok = smartNavigate(['MyInvites', 'ReceivedInvites', 'InvitesInbox']);
+    if (!ok) smartNavigate(['Dates', 'MyInvites' as any]);
+    setNotifSheetVisible(false);
+  }, [smartNavigate]);
+
+  const goToJoinRequests = useCallback(() => {
+    const ok = smartNavigate(['JoinRequests', 'Requests', 'Applicants']);
+    if (!ok) smartNavigate(['Dates', 'JoinRequests' as any]);
+    setNotifSheetVisible(false);
+  }, [smartNavigate]);
+
+  const goToSentInvites = useCallback(() => {
+    const ok = smartNavigate(['MySentInvites', 'SentInvites']);
+    if (!ok) smartNavigate(['Dates', 'MySentInvites' as any]);
+    setNotifSheetVisible(false);
+  }, [smartNavigate]);
+
+  // ---------- UI ----------
   return (
-    <AppShell currentTab="My DrYnks">
-      {/* Tabs */}
-      <View style={styles.tabsRow}>
-        <Chip label="Created" active={tab === 'created'} onPress={() => setTab('created')} />
-        <Chip label="Accepted" active={tab === 'accepted'} onPress={() => setTab('accepted')} />
+    <SafeAreaView style={{ flex: 1, backgroundColor: DRYNKS_WHITE }}>
+      <StatusBar barStyle="dark-content" />
+
+      {/* Fixed, tappable header (on top of everything) */}
+      <View style={[styles.headerWrap, { paddingTop: insets.top }]}>
+        <View style={[styles.headerBar, { height: HEADER_BAR_HEIGHT }]}>
+          <ProfileMenu />
+
+          <Image
+            source={require('@assets/images/DrYnks_Y_logo.png')}
+            style={styles.headerLogo}
+            resizeMode="contain"
+            accessibilityIgnoresInvertColors
+          />
+
+          <TouchableOpacity
+            onPress={openNotifications}
+            accessibilityLabel="Open Notifications"
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="notifications-outline" size={22} color={DRYNKS_BLUE} />
+          </TouchableOpacity>
+        </View>
       </View>
 
-      {/* List */}
-      {loading && data.length === 0 ? (
-        <View style={{ padding: 24 }}>
-          <ActivityIndicator />
+      {/* Content is offset below the fixed header so chips never overlap it */}
+      <View style={{ flex: 1, paddingTop: HEADER_H }}>
+        {/* Tabs */}
+        <View style={styles.tabsRow}>
+          <Chip label="Created" active={tab === 'created'} onPress={() => setTab('created')} />
+          <Chip label="Accepted" active={tab === 'accepted'} onPress={() => setTab('accepted')} />
         </View>
-      ) : (
-        <FlatList
-          data={data}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-  <>
-    {/* keep your variant without breaking TS */}
-    <DateCard
-      date={item}
-      userId={userId!}
-      isCreator={tab === 'created'}
-      isAccepted={tab === 'accepted'}
-      {...({ variant: 'mydates' } as any)}
-      onCancel={async () => {
-        try {
-          if (tab === 'created') {
-            // Creator cancels: delete the whole date
-            const { error } = await supabase.from('date_requests').delete().eq('id', item.id);
-            if (error) throw error;
-            setCreated(prev => prev.filter(d => d.id !== item.id));
-          } else {
-            // Guest cancels: leave the date (remove your id from accepted_users)
-            const { data: row } = await supabase
-              .from('date_requests')
-              .select('accepted_users')
-              .eq('id', item.id)
-              .single();
 
-            const next = (row?.accepted_users || []).filter((id: string) => id !== userId);
-            const { error } = await supabase
-              .from('date_requests')
-              .update({ accepted_users: next })
-              .eq('id', item.id);
-            if (error) throw error;
-            setAccepted(prev => prev.filter(d => d.id !== item.id));
-          }
-        } catch (e) {
-          console.warn('[Cancel error]', e);
-        }
-      }}
-      onOpenChat={() => {
-        navigation.navigate('DateChat', { dateId: item.id });
-      }}
-    />
-  </>
-)}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          onEndReached={() => {
-            if (tab === 'created' && createdHasMore) loadCreated(createdPage + 1, true);
-            if (tab === 'accepted' && acceptedHasMore) loadAccepted(acceptedPage + 1, true);
-          }}
-          onEndReachedThreshold={0.5}
-          ListEmptyComponent={
-            <Text style={styles.empty}>
-              {tab === 'created'
-                ? "You haven't created any dates yet."
-                : "You haven't accepted any dates yet."}
-            </Text>
-          }
-          contentContainerStyle={{ paddingBottom: 24 }}
-        />
-      )}
-    </AppShell>
+        {/* List */}
+        {loading && data.length === 0 ? (
+          <View style={{ padding: 24 }}>
+            <ActivityIndicator />
+          </View>
+        ) : (
+          <FlatList
+            data={data}
+            keyExtractor={(item) => String(item.id)}
+            renderItem={({ item }) => (
+              <DateCard
+                date={item}
+                userId={userId!}
+                context={tab === 'created' ? 'MY_CREATED' : 'MY_ACCEPTED'}
+                isAccepted={tab === 'accepted'}
+                onChat={() => {
+                  try { navigation.navigate('GroupChat', { dateId: item.id }); } catch {}
+                }}
+                onChanged={(ev) => {
+                  if (ev === 'removed') {
+                    if (tab === 'created') setCreated(prev => prev.filter((d: any) => d.id !== item.id));
+                    else setAccepted(prev => prev.filter((d: any) => d.id !== item.id));
+                  }
+                }}
+              />
+            )}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+            onEndReached={() => {
+              if (tab === 'created' && createdHasMore) loadCreated(createdPage + 1, true);
+              if (tab === 'accepted' && acceptedHasMore) loadAccepted(acceptedPage + 1, true);
+            }}
+            onEndReachedThreshold={0.5}
+            ListEmptyComponent={
+              <Text style={styles.empty}>
+                {tab === 'created'
+                  ? "You haven't created any dates yet."
+                  : "You haven't accepted any dates yet."}
+              </Text>
+            }
+            contentContainerStyle={{ paddingBottom: 24 }}
+          />
+        )}
+      </View>
+
+      {/* ---------- Fallback Notifications Sheet ---------- */}
+      <Modal
+        visible={notifSheetVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setNotifSheetVisible(false)}
+      >
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => setNotifSheetVisible(false)}
+          style={styles.sheetOverlay}
+        >
+          <View style={styles.sheet}>
+            <Text style={styles.sheetTitle}>Notifications</Text>
+
+            <TouchableOpacity style={styles.sheetRow} onPress={goToReceivedInvites}>
+              <Ionicons name="mail-unread-outline" color={DRYNKS_BLUE} size={18} />
+              <Text style={styles.sheetText}>Received Invites</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.sheetRow} onPress={goToJoinRequests}>
+              <Ionicons name="people-outline" color={DRYNKS_BLUE} size={18} />
+              <Text style={styles.sheetText}>Join Requests</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.sheetRow} onPress={goToSentInvites}>
+              <Ionicons name="paper-plane-outline" color={DRYNKS_BLUE} size={18} />
+              <Text style={styles.sheetText}>Sent Invites</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sheetRow, { justifyContent: 'center', marginTop: 8 }]}
+              onPress={() => setNotifSheetVisible(false)}
+            >
+              <Text style={[styles.sheetText, { color: DRYNKS_RED, fontWeight: '700' }]}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </SafeAreaView>
   );
 };
 
-function Chip({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active?: boolean;
-  onPress?: () => void;
-}) {
-  return (
-    <TouchableOpacity onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
-    </TouchableOpacity>
-  );
-}
-
 const styles = StyleSheet.create({
+  // Fixed header (above everything, blocks touches behind it)
+  headerWrap: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    zIndex: 200,
+    backgroundColor: DRYNKS_WHITE,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E7EB',
+    ...Platform.select({ android: { elevation: 8 } as any }),
+  },
+  headerBar: {
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  headerLogo: { width: 24, height: 24, tintColor: DRYNKS_RED },
+
   tabsRow: {
     flexDirection: 'row',
     gap: 10,
     paddingHorizontal: 16,
-    paddingTop: 10,
+    paddingTop: 6,
     paddingBottom: 6,
+    backgroundColor: DRYNKS_WHITE,
   },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: '#E7EBF0',
-  },
-  chipActive: {
-    backgroundColor: '#232F39',
-  },
-  chipText: { color: '#23303A', fontWeight: '700' },
-  chipTextActive: { color: '#fff' },
+
   empty: {
     textAlign: 'center',
     color: '#8C97A4',
     padding: 24,
   },
+
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    margin: 16,
+    backgroundColor: DRYNKS_WHITE,
+    borderRadius: 12,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  sheetTitle: {
+    fontWeight: '800',
+    color: DRYNKS_BLUE,
+    fontSize: 16,
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    gap: 10,
+  },
+  sheetText: { color: DRYNKS_BLUE, fontSize: 15, flexShrink: 1 },
 });
 
 export default MyDatesScreen;

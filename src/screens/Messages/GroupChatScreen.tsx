@@ -1,541 +1,657 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+// src/screens/Messages/GroupChatScreen.tsx
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView,
-  Platform, Modal, Alert, Image, FlatList
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { useRoute } from '@react-navigation/native';
-import Animated, { FadeInUp } from 'react-native-reanimated';
-import EmojiSelector from 'react-native-emoji-selector';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
+import { Video } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
+import Animated, { FadeInUp } from 'react-native-reanimated';
 
 import AppShell from '@components/AppShell';
 import { supabase } from '@config/supabase';
+import Avatar from '../../ui/Avatar';
 
-// Crash-safe lazy Notifications (no top-level native import)
-let Notifications: any = {
-  addNotificationReceivedListener: () => ({ remove() {} }),
-  addNotificationResponseReceivedListener: () => ({ remove() {} }),
-  scheduleNotificationAsync: async () => undefined,
-  cancelScheduledNotificationAsync: async () => undefined,
-  cancelAllScheduledNotificationsAsync: async () => undefined,
-  getPermissionsAsync: async () => ({ status: 'undetermined' } as any),
-  requestPermissionsAsync: async () => ({ status: 'denied' } as any),
+type UUID = string;
+type RouteParams = { dateId: UUID; origin?: string };
+
+type DateRow = {
+  id: UUID;
+  title: string | null;
+  event_date: string | null;
+  event_timezone: string | null;
+  creator: UUID;
+  accepted_users: UUID[] | null;
 };
-if (__DEV__) {
-  import('expo-notifications').then((m) => { Notifications = m; }).catch(() => {});
-}
+
+type Profile = { id: UUID; screenname: string | null; profile_photo: string | null };
 
 type ChatMessage = {
-  id: string;
-  date_id: string;
-  user_id: string;
-  content: string;
+  id: UUID;
+  room_id?: UUID | null;            // ← supports room-based chats (group)
+  date_id: UUID | null;             // ← kept for backward compatibility
+  sender_id: UUID | null;
+  content: string | null;
   created_at: string;
-  reply_to?: string | null;
-  media_url?: string | null;
-  reactions?: Array<{ emoji: string; user_id: string }>;
-  type?: 'user' | 'reply' | 'system';
+  reply_to: UUID | null;
+  media_url: string | null;
+  type: 'user' | 'media' | string | null;
 };
 
-const PAGE_SIZE = 20;
-const BUCKET = 'chat_media';
+const BUCKET = 'chat-media';
+const MAX_VIDEO_SEC = 30;
 
-const GroupChatScreen = () => {
-  const route = useRoute() as any;
-  const { dateId } = route.params || {};
+/* ------------------------- helpers (event timing) ------------------------- */
+function getYMDInTZ(date: Date, tz?: string | null) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = fmt.formatToParts(date);
+  let y = 0,
+    m = 0,
+    d = 0;
+  for (const p of parts) {
+    if (p.type === 'year') y = +p.value;
+    if (p.type === 'month') m = +p.value;
+    if (p.type === 'day') d = +p.value;
+  }
+  return { y, m, d };
+}
 
-  const [search, setSearch] = useState('');
+function isChatLocked(eventISO?: string | null, tz?: string | null) {
+  if (!eventISO) return false;
+  try {
+    const ev = new Date(eventISO);
+    const e = getYMDInTZ(ev, tz);
+    const n = getYMDInTZ(new Date(), tz);
+    // lock after end-of-next-day -> when n > e + 1
+    const eNum = e.y * 10000 + e.m * 100 + e.d + 1;
+    const nNum = n.y * 10000 + n.m * 100 + n.d;
+    return nNum > eNum;
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------- main screen ------------------------------ */
+const GroupChatScreen: React.FC = () => {
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { dateId } = (route.params || {}) as RouteParams;
+
+  const [me, setMe] = useState<UUID | null>(null);
+
+  const [date, setDate] = useState<DateRow | null>(null);
+  const [people, setPeople] = useState<Map<UUID, Profile>>(new Map());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
-  const [showEmoji, setShowEmoji] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [text, setText] = useState('');
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
-  const [editMessage, setEditMessage] = useState<ChatMessage | null>(null);
-  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({});
-  const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [mediaUri, setMediaUri] = useState<string>('');
-  const [notificationVisible, setNotificationVisible] = useState(false);
-  const [notifications, setNotifications] = useState<any[]>([]);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
 
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const flatListRef = useRef<FlatList<ChatMessage> | null>(null);
+  // manage modal for participants removal (host only)
+  const [manageOpen, setManageOpen] = useState(false);
 
-  // cache user id
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (mounted) setCurrentUserId(data?.user?.id ?? null);
-    })();
-    return () => { mounted = false; };
+  // Rooms support (if you’ve created chat_rooms + ensure_event_room RPC)
+  const [roomId, setRoomId] = useState<UUID | null>(null);
+
+  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const chMsgsRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  const locked = useMemo(
+    () => isChatLocked(date?.event_date, date?.event_timezone),
+    [date?.event_date, date?.event_timezone]
+  );
+  const participantIds = useMemo(() => {
+    if (!date) return [];
+    const arr = new Set<UUID>([date.creator, ...(date.accepted_users || [])]);
+    return Array.from(arr);
+  }, [date]);
+
+  const scrollToEnd = useCallback(() => {
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
   }, []);
 
-  const groupedReplies = useMemo(() => {
-    const acc: Record<string, ChatMessage[]> = {};
-    for (const msg of messages) {
-      if (msg.reply_to) {
-        (acc[msg.reply_to] ||= []).push(msg);
+  /* ------------------------------ initial load ----------------------------- */
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      setMe(data?.session?.user?.id ?? null);
+    })();
+  }, []);
+
+  // If RPC exists, this will resolve a room for the event; if not, it silently no-ops.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.rpc('ensure_event_room', { p_date_id: dateId });
+        if (!error && data && !cancelled) setRoomId(data as UUID);
+      } catch {
+        // ignore if RPC not deployed; we'll keep using date_id flow
       }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dateId]);
+
+  const loadDateAndPeople = useCallback(async () => {
+    const { data: d } = await supabase
+      .from('date_requests')
+      .select('id, title, event_date, event_timezone, creator, accepted_users')
+      .eq('id', dateId)
+      .maybeSingle();
+    setDate(d as DateRow | null);
+
+    const ids = new Set<UUID>();
+    if (d?.creator) ids.add(d.creator);
+    (d?.accepted_users || []).forEach((u: UUID) => ids.add(u));
+    if (ids.size) {
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, screenname, profile_photo')
+        .in('id', Array.from(ids));
+      const map = new Map<UUID, Profile>();
+      (profs || []).forEach((p: any) =>
+        map.set(p.id, { id: p.id, screenname: p.screenname, profile_photo: p.profile_photo })
+      );
+      setPeople(map);
+    } else {
+      setPeople(new Map());
     }
-    return acc;
-  }, [messages]);
+  }, [dateId]);
 
-  const highlightMentions = (text: string) => {
-    const parts = text.split(/(@\w+)/g);
-    return parts.map((part, i) =>
-      part.startsWith('@') ? (
-        <Text key={i} style={styles.mention}>{part}</Text>
-      ) : (
-        <Text key={i}>{part}</Text>
+  const loadMessages = useCallback(async () => {
+    const column = roomId ? 'room_id' : 'date_id';
+    const value = (roomId ?? dateId) as UUID;
+
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .select('id, room_id, date_id, sender_id, content, created_at, reply_to, media_url, type')
+      .eq(column, value)
+      .order('created_at', { ascending: true });
+
+    if (!error) {
+      setMessages((data || []) as ChatMessage[]);
+      scrollToEnd();
+    }
+  }, [dateId, roomId, scrollToEnd]);
+
+  // unread → mark seen (keeps your existing structure that keys by date_id)
+  const markSeen = useCallback(async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const uid = data?.session?.user?.id as UUID | undefined;
+      if (!uid) return;
+      await supabase
+        .from('chat_seen')
+        .upsert({ date_id: dateId, user_id: uid, last_seen: new Date().toISOString() });
+    } catch {}
+  }, [dateId]);
+
+  // live updates
+  const attachRealtime = useCallback(() => {
+    try {
+      chMsgsRef.current?.unsubscribe();
+    } catch {}
+    const filterCol = roomId ? 'room_id' : 'date_id';
+    const filterVal = (roomId ?? dateId) as UUID;
+
+    chMsgsRef.current = supabase
+      .channel(`chat:${filterVal}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: `${filterCol}=eq.${filterVal}` },
+        (payload: any) => {
+          const msg = payload?.new as ChatMessage;
+          setMessages(prev => [...prev, msg]);
+          scrollToEnd();
+          markSeen();
+        }
       )
-    );
+      .subscribe(() => {});
+  }, [dateId, roomId, scrollToEnd, markSeen]);
+
+  useEffect(() => {
+    loadDateAndPeople();
+    loadMessages();
+    attachRealtime();
+    return () => {
+      try {
+        chMsgsRef.current?.unsubscribe();
+      } catch {}
+    };
+  }, [loadDateAndPeople, loadMessages, attachRealtime]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      markSeen();
+      return () => {};
+    }, [markSeen])
+  );
+
+  /* ------------------------------ send content ----------------------------- */
+
+  const sendPushForMessage = async (m: ChatMessage) => {
+    // Non-blocking; wire this to your Edge Function or notifications table.
+    try {
+      await supabase.from('notifications').insert([
+        {
+          user_id: null, // fill if you notify per-user
+          message: 'New chat message',
+          screen: 'GroupChat',
+          params: { date_id: m.date_id, room_id: m.room_id, message_id: m.id },
+        },
+      ]);
+    } catch {}
   };
 
-  const handleTyping = useCallback(async (text: string) => {
-    setInput(text);
-    if (!currentUserId) return;
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    await supabase.from('chat_typing').upsert({ user_id: currentUserId, typing: true });
-    typingTimeoutRef.current = setTimeout(async () => {
-      await supabase.from('chat_typing').upsert({ user_id: currentUserId, typing: false });
-    }, 2000);
-  }, [currentUserId]);
+  const uploadMedia = async (): Promise<{ media_url: string; type: 'image' | 'video' } | null> => {
+    setPickerBusy(true);
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        allowsEditing: false,
+        quality: 0.85,
+        videoMaxDuration: MAX_VIDEO_SEC,
+      });
+      if (res.canceled || !res.assets?.length) return null;
 
-  const handleEdit = (msg: ChatMessage) => {
-    setEditMessage(msg);
-    setInput(msg.content);
+      const asset = res.assets[0];
+      const isVideo = asset.type?.startsWith('video');
+      const fileUri = asset.uri;
+      const fileExt = isVideo ? 'mp4' : 'jpg';
+      const prefix = (roomId ?? dateId) as UUID;
+      const path = `${prefix}/${me}/${Date.now()}.${fileExt}`;
+
+      const file = await fetch(fileUri).then(r => r.blob());
+      const { data, error } = await supabase.storage
+        .from(BUCKET)
+        .upload(path, file, {
+          upsert: false,
+          contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+        });
+      if (error) throw error;
+
+      const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(data.path);
+      return { media_url: pub.publicUrl, type: isVideo ? 'video' : 'image' };
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not upload media.');
+      return null;
+    } finally {
+      setPickerBusy(false);
+    }
   };
 
-  const handleDelete = async (id: string) => {
-    Alert.alert('Delete Message', 'Are you sure you want to delete this message?', [
+  const sendText = useCallback(async () => {
+    const body = text.trim();
+    if (!body || !dateId || !me) return;
+    setSending(true);
+    try {
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .insert({
+          room_id: roomId ?? null,          // new rooms flow
+          date_id: roomId ? null : dateId,  // legacy flow
+          sender_id: me,
+          content: body,
+          reply_to: replyTo?.id ?? null,
+          type: 'user',
+        })
+        .select('*')
+        .single();
+      if (error) throw error;
+      setText('');
+      setReplyTo(null);
+      scrollToEnd();
+      markSeen();
+      await sendPushForMessage(data as ChatMessage);
+    } catch (e: any) {
+      Alert.alert('Send failed', e?.message || 'Try again later.');
+    } finally {
+      setSending(false);
+    }
+  }, [dateId, roomId, me, text, replyTo, scrollToEnd, markSeen]);
+
+  const sendAttachment = useCallback(async () => {
+    const uploaded = await uploadMedia();
+    if (!uploaded || !me) return;
+    setSending(true);
+    try {
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .insert({
+          room_id: roomId ?? null,
+          date_id: roomId ? null : dateId,
+          sender_id: me,
+          content: uploaded.type === 'image' ? '[photo]' : '[video]',
+          media_url: uploaded.media_url,
+          reply_to: replyTo?.id ?? null,
+          type: 'media',
+        })
+        .select('*')
+        .single();
+      if (error) throw error;
+      setReplyTo(null);
+      scrollToEnd();
+      markSeen();
+      await sendPushForMessage(data as ChatMessage);
+    } catch (e: any) {
+      Alert.alert('Send failed', e?.message || 'Try again later.');
+    } finally {
+      setSending(false);
+    }
+  }, [dateId, roomId, me, replyTo, scrollToEnd, markSeen]);
+
+  /* ------------------------------ participants ----------------------------- */
+
+  const isHost = useMemo(() => !!(me && date && me === date.creator), [me, date]);
+
+  const removeParticipant = async (userId: UUID) => {
+    if (!date || !isHost) return;
+    Alert.alert('Remove from date?', 'They will be removed from the chat and the event.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Delete',
+        text: 'Remove',
         style: 'destructive',
         onPress: async () => {
-          await supabase.from('chat_messages').delete().eq('id', id);
-          setMessages(prev => prev.filter(m => m.id !== id));
+          try {
+            const next = (date.accepted_users || []).filter(u => u !== userId);
+            const { error } = await supabase
+              .from('date_requests')
+              .update({ accepted_users: next })
+              .eq('id', date.id);
+            if (error) throw error;
+            await loadDateAndPeople();
+          } catch (e: any) {
+            Alert.alert('Error', e?.message || 'Could not remove the user.');
+          }
         },
       },
     ]);
   };
 
-  const renderReactions = (messageId: string) => {
-    const msg = messages.find(m => m.id === messageId);
-    const reacts = msg?.reactions || [];
-    if (!reacts.length) return null;
-    return (
-      <Text style={{ marginTop: 4 }}>
-        {reacts.map((r, idx) => <Text key={idx} style={{ fontSize: 14 }}>{r.emoji} </Text>)}
-      </Text>
-    );
-  };
+  /* --------------------------------- render -------------------------------- */
 
-  const toggleThread = (id: string) =>
-    setExpandedThreads(prev => ({ ...prev, [id]: !prev[id] }));
+  const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
+    const mine = me && item.sender_id === me;
+    const prev = messages[index - 1];
+    const sameAsPrev = prev && prev.sender_id === item.sender_id;
 
-  const pinMessage = async (id: string) =>
-    supabase.from('chat_messages').update({ pinned: true }).eq('id', id);
-
-  const muteUser = async (userId: string) =>
-    supabase.from('chat_mutes').insert({ date_id: dateId, user_id: userId });
-
-  const removeUser = async (userId: string) =>
-    supabase.from('chat_participants').delete().eq('user_id', userId).eq('date_id', dateId);
-
-  const fetchMessages = useCallback(async (beforeTimestamp: string | null = null) => {
-    let q = supabase
-      .from('chat_messages')
-      .select('*')
-      .eq('date_id', dateId)
-      .order('created_at', { ascending: false })
-      .limit(PAGE_SIZE);
-
-    if (beforeTimestamp) q = q.lt('created_at', beforeTimestamp);
-
-    const { data, error } = await q;
-    if (!error && data) setMessages(prev => [...data.reverse(), ...prev]);
-  }, [dateId]);
-
-  // startup: cleanup old media, hydrate, subscribe
-  useEffect(() => {
-    let mounted = true;
-
-    (async () => {
-      const now = new Date();
-      const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString();
-      const { data } = await supabase
-        .from('chat_messages')
-        .select('id, media_url, created_at')
-        .lt('created_at', twoDaysAgo)
-        .not('media_url', 'is', null);
-
-      if (mounted && data?.length) {
-        for (const msg of data) {
-          try {
-            const filename = msg.media_url!.split('/').pop()!;
-            await supabase.storage.from(BUCKET).remove([filename]);
-            await supabase.from('chat_messages').delete().eq('id', msg.id);
-          } catch {}
-        }
-      }
-
-      await fetchMessages();
-
-      const channel = supabase
-        .channel(`chat_${dateId}`)
-        .on('postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'chat_messages' },
-          payload => {
-            if (payload.new.date_id === dateId) {
-              setMessages(prev => [...prev, payload.new as any]);
-              flatListRef.current?.scrollToEnd?.({ animated: true });
-            }
-          }
-        )
-        .on('postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'chat_typing' },
-          payload => {
-            const { user_id, typing } = payload.new as any;
-            if (!currentUserId || user_id === currentUserId) return;
-            setTypingUsers(prev => typing
-              ? [...new Set([...prev, user_id])]
-              : prev.filter(id => id !== user_id)
-            );
-          }
-        )
-        .on('postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'chat_reactions' },
-          payload => {
-            const r = payload.new as any;
-            setMessages(prev =>
-              prev.map(m => m.id === r.message_id
-                ? { ...m, reactions: [...(m.reactions || []), r] }
-                : m
-              )
-            );
-          }
-        )
-        .subscribe();
-
-      return () => { supabase.removeChannel(channel); };
-    })();
-
-    return () => { mounted = false; };
-  }, [dateId, currentUserId, fetchMessages]);
-
-  const pickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 0.7,
-    });
-    if (!result.canceled) setMediaUri(result.assets[0].uri);
-  };
-
-  const uploadMediaIfAny = async (): Promise<string> => {
-    if (!mediaUri) return '';
-    const filename = `${Date.now()}_${mediaUri.split('/').pop()}`;
-    const res = await fetch(mediaUri);
-    const blob = await res.blob();
-    const { data, error } = await supabase.storage.from(BUCKET).upload(filename, blob, {
-      contentType: 'image/jpeg',
-      upsert: true,
-    });
-    if (error || !data) return '';
-    const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(data.path);
-    return pub?.publicUrl ?? '';
-  };
-
-  const sendMessage = async () => {
-    if (!currentUserId || !input.trim()) return;
-
-    const mediaUrl = await uploadMediaIfAny();
-
-    const payload = {
-      content: input.trim(),
-      user_id: currentUserId,
-      date_id: dateId,
-      reply_to: replyTo?.id || null,
-      read_by: [currentUserId],
-      type: replyTo ? 'reply' : 'user',
-      media_url: mediaUrl || null,
-    };
-
-    const { data: inserted, error } = await supabase
-      .from('chat_messages')
-      .insert(payload)
-      .select();
-
-    if (!error && inserted && inserted[0]) {
-      // optional: your server push (dev only while prod push is killed)
-      // await sendPushNotification('New Message', `${currentUserId}: ${payload.content}`);
-      setMessages(prev => [...prev, inserted[0] as any]);
-    }
-    setInput('');
-    setReplyTo(null);
-    setMediaUri('');
-  };
-
-  const renderThread = (parent: ChatMessage) => {
-    const replies = groupedReplies[parent.id] || [];
-    const expanded = expandedThreads[parent.id];
-    const showActions = parent.user_id === currentUserId;
-
-    if (parent.type === 'system') {
-      return (
-        <Text style={{ color: '#888', fontStyle: 'italic', textAlign: 'center', marginVertical: 8 }}>
-          {parent.content}
-        </Text>
-      );
-    }
+    const senderProfile = item.sender_id ? people.get(item.sender_id) : null;
+    const name = senderProfile?.screenname || 'User';
+    const avatarUrl = senderProfile?.profile_photo || undefined;
 
     return (
-      <Animated.View entering={FadeInUp} style={styles.messageBubble}>
-        <TouchableOpacity
-          onLongPress={() => setReactionPicker({ messageId: parent.id, visible: true })}
-          onPress={() => toggleThread(parent.id)}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.messageText}>{highlightMentions(parent.content)}</Text>
-
-          {!!parent.media_url && (
-            <TouchableOpacity
-              onPress={() => setProfileModal({ visible: true, profile: { screenname: 'Image Viewer', image: parent.media_url } })}
-              activeOpacity={0.9}
-              style={{ marginTop: 8 }}
-            >
-              <Image source={{ uri: parent.media_url }} style={{ width: '100%', height: 180, borderRadius: 10 }} />
-              {showActions && (
-                <TouchableOpacity
-                  onPress={() => {
-                    Alert.alert('Delete Media', 'Are you sure you want to delete this media?', [
-                      { text: 'Cancel', style: 'cancel' },
-                      {
-                        text: 'Delete', style: 'destructive',
-                        onPress: async () => {
-                          const filename = parent.media_url!.split('/').pop()!;
-                          await supabase.storage.from(BUCKET).remove([filename]);
-                          await supabase.from('chat_messages').delete().eq('id', parent.id);
-                          fetchMessages();
-                        },
-                      },
-                    ]);
-                  }}
-                >
-                  <Text style={{ color: '#d00', fontSize: 12, marginTop: 4 }}>🗑 Delete Media</Text>
-                </TouchableOpacity>
-              )}
-            </TouchableOpacity>
-          )}
-
-          <Text style={styles.timestamp}>{new Date(parent.created_at).toLocaleTimeString()}</Text>
-          <Text style={styles.replyTap}>💬 Reply ({replies.length})</Text>
-          {renderReactions(parent.id)}
-        </TouchableOpacity>
-
-        {showActions && (
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 4 }}>
-            <TouchableOpacity onPress={() => handleEdit(parent)}><Text style={styles.edit}>✏️ Edit</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => handleDelete(parent.id)}><Text style={styles.delete}>🗑 Delete</Text></TouchableOpacity>
-          </View>
+      <Animated.View
+        entering={FadeInUp}
+        style={[styles.msgRow, mine ? { justifyContent: 'flex-end' } : { justifyContent: 'flex-start' }]}
+      >
+        {!mine && !sameAsPrev ? (
+          <Avatar url={avatarUrl} size={26} />
+        ) : (
+          !mine && sameAsPrev && <View style={[styles.avatar, { opacity: 0 }]} />
         )}
 
-        {/* Admin tools (set your own rule) */}
-        {true && (
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 4 }}>
-            <TouchableOpacity onPress={() => handlePin(parent.id)}><Text style={styles.edit}>📌 Pin</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => handleMute(parent.user_id)}><Text style={styles.delete}>🔇 Mute</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => removeUser(parent.user_id)}><Text style={styles.delete}>❌ Remove</Text></TouchableOpacity>
-          </View>
-        )}
+        <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
+          {!mine && !sameAsPrev ? <Text style={styles.senderName}>{name}</Text> : null}
 
-        {expanded && replies.map(reply => (
-          <View key={reply.id} style={styles.replyIndented}>
-            <TouchableOpacity onLongPress={() => setReactionPicker({ messageId: reply.id, visible: true })}>
-              <Text style={styles.replyHint}>↩️ {highlightMentions(reply.content)}</Text>
-              <Text style={styles.timestamp}>{new Date(reply.created_at).toLocaleTimeString()}</Text>
-              <Text style={styles.replyTap} onPress={() => setReplyTo(reply)}>💬 Reply</Text>
-              {renderReactions(reply.id)}
-            </TouchableOpacity>
+          {item.reply_to ? (
+            <View style={styles.replyBox}>
+              {(() => {
+                const ref = messages.find(m => m.id === item.reply_to);
+                const sn = ref?.sender_id ? people.get(ref.sender_id!)?.screenname || 'User' : 'User';
+                return (
+                  <>
+                    <Text style={styles.replySender}>{sn}</Text>
+                    <Text numberOfLines={2} style={styles.replyText}>
+                      {ref?.content || (ref?.media_url ? '[media]' : '')}
+                    </Text>
+                  </>
+                );
+              })()}
+            </View>
+          ) : null}
 
-            {reply.user_id === currentUserId && (
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 4 }}>
-                <TouchableOpacity onPress={() => handleEdit(reply)}><Text style={styles.edit}>✏️ Edit</Text></TouchableOpacity>
-                <TouchableOpacity onPress={() => handleDelete(reply.id)}><Text style={styles.delete}>🗑 Delete</Text></TouchableOpacity>
-              </View>
-            )}
+          {item.media_url ? (
+            item.type === 'media' && item.content === '[video]' ? (
+              <Video source={{ uri: item.media_url }} style={styles.media} useNativeControls resizeMode="cover" />
+            ) : (
+              <Image source={{ uri: item.media_url }} style={styles.media} />
+            )
+          ) : null}
+
+          {item.content ? <Text style={styles.msgText}>{item.content}</Text> : null}
+
+          <View style={styles.metaRow}>
+            <Text style={styles.meta}>
+              {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+            {!mine ? (
+              <TouchableOpacity onPress={() => setReplyTo(item)} style={{ marginLeft: 8 }}>
+                <Ionicons name="return-up-back" size={16} color="#888" />
+              </TouchableOpacity>
+            ) : null}
           </View>
-        ))}
+        </View>
       </Animated.View>
     );
   };
 
-  const [reactionPicker, setReactionPicker] = useState<{ messageId: string; visible: boolean }>({ messageId: '', visible: false });
-  const [profileModal, setProfileModal] = useState<{ visible: boolean; profile: any | null }>({ visible: false, profile: null });
-
-  const addReaction = async (messageId: string, emoji: string) => {
-    if (!currentUserId) return;
-    await supabase.from('chat_reactions').upsert({ message_id: messageId, user_id: currentUserId, emoji });
-    setReactionPicker({ messageId: '', visible: false });
-  };
-
-  const handlePin = (id: string) =>
-    Alert.alert('Pin Message', 'Pin this message for everyone to see?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Pin', onPress: () => pinMessage(id) },
-    ]);
-
-  const handleMute = (userId: string) =>
-    Alert.alert('Mute User', 'Mute this user in chat?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Mute', onPress: () => muteUser(userId) },
-    ]);
-
-  const onModalMarkRead = async (id: string) => {
-    await supabase.from('notifications').update({ read: true }).eq('id', id);
-    setNotifications(curr => curr.filter(n => n.id !== id));
-  };
+  const headerRight = (
+    <TouchableOpacity onPress={() => setManageOpen(true)} disabled={!isHost} style={{ opacity: isHost ? 1 : 0.35 }}>
+      <Ionicons name="people-outline" size={22} color="#111" />
+    </TouchableOpacity>
+  );
 
   return (
-    <AppShell currentTab="Vibe">
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={80}>
-        {typingUsers.length > 0 && (
-          <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-            <Text style={{ color: '#888', fontStyle: 'italic' }}>
-              {typingUsers.length === 1 ? 'Someone is typing...' : 'Several people are typing...'}
-            </Text>
+    <AppShell headerTitle={date?.title || 'Chat'} showBack rightAccessory={headerRight} currentTab={undefined}>
+      {/* participants row */}
+      <View style={styles.participants}>
+        {participantIds.slice(0, 8).map(id => {
+          const p = people.get(id);
+          return (
+            <View key={id} style={styles.participant}>
+              <Avatar url={p?.profile_photo || undefined} size={32} />
+            </View>
+          );
+        })}
+        {participantIds.length > 8 ? (
+          <View style={[styles.participant, styles.moreCount]}>
+            <Text style={{ color: '#fff', fontWeight: '800', fontSize: 12 }}>+{participantIds.length - 8}</Text>
           </View>
-        )}
+        ) : null}
+      </View>
 
-        <TextInput
-          style={{ backgroundColor: '#f0f0f0', padding: 10, margin: 12, borderRadius: 8 }}
-          placeholder="Search messages..."
-          value={search}
-          onChangeText={setSearch}
-        />
-
+      {/* messages */}
+      {!messages.length ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          {date ? (
+            locked ? (
+              <Text style={{ color: '#666', textAlign: 'center' }}>
+                This chat is now read‑only. You can still view past messages.
+              </Text>
+            ) : (
+              <Text style={{ color: '#666', textAlign: 'center' }}>No messages yet — say hi 👋</Text>
+            )
+          ) : (
+            <ActivityIndicator />
+          )}
+        </View>
+      ) : (
         <FlatList
-          ref={flatListRef}
-          data={messages.filter(m => !m.reply_to && (m.content || '').toLowerCase().includes(search.toLowerCase()))}
-          keyExtractor={(item) => String(item.id)}
-          renderItem={({ item }) => renderThread(item)}
-          contentContainerStyle={{ padding: 12 }}
-          onEndReached={() => {
-            const oldest = messages[0];
-            if (oldest) fetchMessages(oldest.created_at);
-          }}
-          onEndReachedThreshold={0.1}
+          ref={listRef}
+          data={messages}
+          renderItem={renderMessage}
+          keyExtractor={m => m.id}
+          contentContainerStyle={{ padding: 12, paddingBottom: 10 }}
+          onContentSizeChange={scrollToEnd}
+          onScrollEndDrag={markSeen}
         />
+      )}
 
-        {replyTo && (
-          <View style={styles.replyBox}>
-            <Text style={styles.replyingText}>Replying to: {replyTo.content}</Text>
-            <Text style={styles.cancelReply} onPress={() => setReplyTo(null)}>✖ Cancel</Text>
+      {/* composer */}
+      <KeyboardAvoidingView
+        behavior={Platform.select({ ios: 'padding', android: undefined })}
+        keyboardVerticalOffset={Platform.select({ ios: 84, android: 0 })}
+      >
+        {replyTo ? (
+          <View style={styles.replyBar}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.replyLabel}>Replying to</Text>
+              <Text numberOfLines={2} style={styles.replyPreview}>
+                {replyTo.content || (replyTo.media_url ? '[media]' : '')}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => setReplyTo(null)}>
+              <Ionicons name="close-circle" size={20} color="#888" />
+            </TouchableOpacity>
           </View>
-        )}
+        ) : null}
 
-        <View style={styles.inputRow}>
-          <TouchableOpacity onPress={() => setShowEmoji(!showEmoji)}>
-            <Text style={styles.emojiToggle}>😀</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={pickImage}>
-            <Text style={styles.emojiToggle}>📷</Text>
+        <View style={[styles.inputRow, locked && { opacity: 0.5 }]}>
+          <TouchableOpacity onPress={sendAttachment} disabled={locked || pickerBusy} style={styles.attachBtn}>
+            <Ionicons name="image-outline" size={22} color="#444" />
           </TouchableOpacity>
           <TextInput
             style={styles.input}
-            placeholder="Type something brilliant..."
-            value={input}
-            onChangeText={handleTyping}
+            placeholder={locked ? 'Chat closed' : 'Message'}
+            value={text}
+            onChangeText={setText}
+            multiline
+            editable={!locked && !sending}
           />
-          <TouchableOpacity onPress={sendMessage} style={styles.sendBtn}>
-            <Text style={styles.sendText}>{editMessage ? 'Update' : 'Send'}</Text>
+          <TouchableOpacity onPress={sendText} disabled={locked || sending || !text.trim()} style={styles.sendBtn}>
+            {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
           </TouchableOpacity>
         </View>
-
-        {showEmoji && (
-          <EmojiSelector
-            onEmojiSelected={(emoji: string) => setInput(prev => prev + emoji)}
-            showSearchBar={false}
-            showTabs
-          />
-        )}
-
-        {/* Reaction picker */}
-        <Modal visible={reactionPicker.visible} transparent animationType="fade">
-          <TouchableOpacity
-            style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}
-            onPress={() => setReactionPicker({ messageId: '', visible: false })}
-          >
-            <View style={{ backgroundColor: '#fff', padding: 20, borderRadius: 16 }}>
-              <Text style={{ fontWeight: '700', marginBottom: 12 }}>React with:</Text>
-              <View style={{ flexDirection: 'row' }}>
-                {['❤️', '😂', '🔥', '👍', '👀'].map(emoji => (
-                  <TouchableOpacity key={emoji} onPress={() => addReaction(reactionPicker.messageId, emoji)}>
-                    <Text style={{ fontSize: 24, marginHorizontal: 8 }}>{emoji}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          </TouchableOpacity>
-        </Modal>
-
-        {/* Simple notifications modal (local list) */}
-        <NotificationModal
-          visible={notificationVisible}
-          onClose={() => setNotificationVisible(false)}
-          notifications={notifications}
-          onMarkRead={onModalMarkRead}
-        />
       </KeyboardAvoidingView>
+
+      {/* manage participants (host) */}
+      <Modal visible={manageOpen} transparent animationType="fade" onRequestClose={() => setManageOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Participants</Text>
+            {participantIds.map(id => {
+              const p = people.get(id);
+              const canRemove = isHost && id !== date?.creator;
+              return (
+                <View key={id} style={styles.rowUser}>
+                  <Avatar url={p?.profile_photo || undefined} size={30} />
+                  <Text style={styles.rowName} numberOfLines={1}>
+                    {p?.screenname || 'User'}
+                  </Text>
+                  {canRemove ? (
+                    <TouchableOpacity onPress={() => removeParticipant(id)} style={styles.removeBtn}>
+                      <Ionicons name="remove-circle" size={20} color="#E34E5C" />
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={{ width: 20 }} />
+                  )}
+                </View>
+              );
+            })}
+            <TouchableOpacity onPress={() => setManageOpen(false)} style={styles.closeBtn}>
+              <Text style={{ color: '#fff', fontWeight: '700' }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </AppShell>
   );
 };
 
 const styles = StyleSheet.create({
-  messageBubble: { backgroundColor: '#f2f2f2', padding: 12, borderRadius: 12, marginBottom: 12 },
-  messageText: { fontSize: 16 },
-  mention: { fontSize: 16, color: '#ff5a5f', fontWeight: '700' },
-  timestamp: { fontSize: 12, color: '#888', marginTop: 4 },
-  replyTap: { fontSize: 12, color: '#007AFF', marginTop: 4 },
-  replyHint: { fontSize: 13, color: '#555', marginBottom: 4, fontStyle: 'italic' },
-  replyBox: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#fff0f0' },
-  replyingText: { color: '#ff5a5f' },
-  cancelReply: { color: '#999', fontStyle: 'italic' },
-  inputRow: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: '#fff', borderTopWidth: 1, borderColor: '#eee' },
-  emojiToggle: { fontSize: 24, marginRight: 8 },
-  input: { flex: 1, height: 40, borderWidth: 1, borderColor: '#ddd', borderRadius: 10, paddingHorizontal: 10 },
-  sendBtn: { backgroundColor: '#ff5a5f', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, marginLeft: 8 },
-  sendText: { color: '#fff', fontWeight: '600' },
-  replyIndented: { backgroundColor: '#e9e9e9', padding: 10, borderRadius: 10, marginTop: 6, marginLeft: 16 },
-  edit: { marginHorizontal: 8, color: '#555' },
-  delete: { marginHorizontal: 8, color: '#d00' },
-});
+  participants: { flexDirection: 'row', padding: 10, paddingTop: 4, gap: 6, alignItems: 'center' },
+  participant: { width: 32, height: 32, borderRadius: 16, overflow: 'hidden', borderColor: '#fff', borderWidth: 1 },
+  participantAvatar: { width: '100%', height: '100%' },
+  moreCount: { backgroundColor: '#999', alignItems: 'center', justifyContent: 'center' },
 
-const NotificationModal = ({
-  visible, onClose, notifications, onMarkRead,
-}: {
-  visible: boolean;
-  onClose: () => void;
-  notifications: any[];
-  onMarkRead: (id: string) => Promise<void>;
-}) => (
-  <Modal visible={visible} transparent animationType="fade">
-    <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' }} onPress={onClose}>
-      <View style={{ marginTop: 100, marginHorizontal: 40, backgroundColor: '#fff', borderRadius: 10, padding: 20 }}>
-        <Text style={{ fontSize: 18, fontWeight: 'bold', marginBottom: 10 }}>Notifications</Text>
-        {notifications.length === 0 ? (
-          <Text style={{ color: '#888' }}>No notifications</Text>
-        ) : (
-          notifications.map((n, i) => (
-            <TouchableOpacity key={i} onPress={() => onMarkRead(n.id)}>
-              <Text style={{ marginBottom: 6 }}>{n.message}</Text>
-            </TouchableOpacity>
-          ))
-        )}
-      </View>
-    </TouchableOpacity>
-  </Modal>
-);
+  msgRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 8, gap: 6 },
+  avatar: { width: 26, height: 26, borderRadius: 13, marginRight: 6 },
+  bubble: { maxWidth: '78%', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 12 },
+  bubbleMine: { backgroundColor: '#EAF7EE', marginLeft: 40 },
+  bubbleOther: { backgroundColor: '#fff', marginRight: 40, borderWidth: StyleSheet.hairlineWidth, borderColor: '#ddd' },
+  senderName: { fontSize: 11, fontWeight: '700', color: '#333', marginBottom: 2 },
+  msgText: { color: '#222', fontSize: 15 },
+
+  media: { width: 220, height: 220, borderRadius: 10, marginBottom: 6 },
+
+  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 },
+  meta: { fontSize: 11, color: '#7a7a7a' },
+
+  replyBox: {
+    backgroundColor: 'rgba(0,0,0,0.04)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#9ac4ff',
+    padding: 6,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  replySender: { fontSize: 11, fontWeight: '700', color: '#333' },
+  replyText: { fontSize: 12, color: '#444' },
+
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    padding: 10,
+    gap: 8,
+    backgroundColor: '#F7F8FA',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#e5e7eb',
+  },
+  attachBtn: { padding: 8 },
+  input: {
+    flex: 1,
+    minHeight: 40,
+    maxHeight: 120,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e5e7eb',
+  },
+  sendBtn: { backgroundColor: '#E34E5C', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12 },
+
+  replyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#fff3c9',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#f1da93',
+  },
+  replyLabel: { fontWeight: '800', color: '#9a6b00', fontSize: 12 },
+  replyPreview: { color: '#6d5d00', fontSize: 12 },
+
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  modalCard: { width: '100%', maxWidth: 420, backgroundColor: '#fff', borderRadius: 14, padding: 14 },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: '#111', marginBottom: 10 },
+  rowUser: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  rowAvatar: { width: 30, height: 30, borderRadius: 15 },
+  rowName: { flex: 1, color: '#222', fontWeight: '600' },
+  removeBtn: { padding: 6 },
+  closeBtn: { backgroundColor: '#111', marginTop: 12, paddingVertical: 10, borderRadius: 10, alignItems: 'center' },
+});
 
 export default GroupChatScreen;
