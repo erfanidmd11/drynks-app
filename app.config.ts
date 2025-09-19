@@ -1,14 +1,12 @@
-// app.config.ts
 import 'dotenv/config';
 import type { ExpoConfig } from '@expo/config';
 
-// Associated Domains (iOS universal links)
 const ASSOCIATED_DOMAINS = [
   'applinks:dr-ynks.app.link',
-  'applinks:dr-ynks.page.link',
-] as const;
+  // Developer/test Branch domain (replaces dr-ynks.page.link)
+  'applinks:dr-ynks-alternate.app.link?mode=developer',
+];
 
-// Your EAS project ID (from EAS)
 const PROJECT_ID = 'c3eeca28-9032-43dd-bef7-7697e473ccb2';
 
 const config: ExpoConfig = {
@@ -17,23 +15,15 @@ const config: ExpoConfig = {
   version: '1.0.0',
   orientation: 'portrait',
   icon: './assets/images/app_icon.png',
-
-  // Ensure our guard runs first
   entryPoint: './index.js',
-
-  // Deep linking scheme
   scheme: 'dr-ynks',
   userInterfaceStyle: 'automatic',
-
   splash: {
     image: './assets/images/drYnks_logo.png',
     resizeMode: 'contain',
     backgroundColor: '#ffffff',
   },
-
   assetBundlePatterns: ['**/*'],
-
-  // EAS Updates (now with URL so channels work)
   updates: {
     fallbackToCacheTimeout: 0,
     url: `https://u.expo.dev/${PROJECT_ID}`,
@@ -43,8 +33,9 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'com.drynks.app',
-    buildNumber: '2025081459', // bump as needed
+    buildNumber: '2025091704',
     usesAppleSignIn: true,
+    associatedDomains: [...ASSOCIATED_DOMAINS],
     infoPlist: {
       NSLocationWhenInUseUsageDescription:
         'This app uses your location to find nearby dates and events.',
@@ -68,12 +59,10 @@ const config: ExpoConfig = {
         'Allow Face ID to quickly unlock your account.',
       ITSAppUsesNonExemptEncryption: false,
     },
-    // Associated Domains entitlement
-    associatedDomains: [...ASSOCIATED_DOMAINS],
   },
 
   android: {
-    package: 'com.drynks.dev',
+    package: 'com.drynks.dev',               // keep current package
     versionCode: 2,
     adaptiveIcon: {
       foregroundImage: './assets/images/app_icon.png',
@@ -90,22 +79,25 @@ const config: ExpoConfig = {
       'RECORD_AUDIO',
     ],
     intentFilters: [
+      // Custom URI scheme fallback
       {
         action: 'VIEW',
         category: ['BROWSABLE', 'DEFAULT'],
         data: [{ scheme: 'dr-ynks' }],
       },
+      // Branch primary domain
       {
         autoVerify: true,
         action: 'VIEW',
         category: ['BROWSABLE', 'DEFAULT'],
-        data: [{ scheme: 'https', host: 'dr-ynks.app.link' }],
+        data: [{ scheme: 'https', host: 'dr-ynks.app.link', pathPrefix: '/' }],
       },
+      // Branch dev/testing domain (replaces dr-ynks.page.link)
       {
         autoVerify: true,
         action: 'VIEW',
         category: ['BROWSABLE', 'DEFAULT'],
-        data: [{ scheme: 'https', host: 'dr-ynks.page.link' }],
+        data: [{ scheme: 'https', host: 'dr-ynks-alternate.app.link', pathPrefix: '/' }],
       },
     ],
   },
@@ -115,22 +107,15 @@ const config: ExpoConfig = {
   },
 
   extra: {
-    // Private (read via process.env on build), keep legacy keys for compatibility
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY,
     GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
-
-    // Public (available in JS at runtime)
     EXPO_PUBLIC_GOOGLE_API_KEY: process.env.EXPO_PUBLIC_GOOGLE_API_KEY,
-    // Enable push by default; flip to '1' locally to disable
     EXPO_PUBLIC_DISABLE_PUSH: process.env.EXPO_PUBLIC_DISABLE_PUSH ?? '0',
-    // Enable biometrics by default; flip to '1' in .env to disable
     EXPO_PUBLIC_DISABLE_BIOMETRICS: process.env.EXPO_PUBLIC_DISABLE_BIOMETRICS ?? '0',
-
-    // Optional: safe boot toggle your app references
     EXPO_PUBLIC_SAFE_BOOT: process.env.EXPO_PUBLIC_SAFE_BOOT ?? '1',
-
     eas: { projectId: PROJECT_ID },
+    BRANCH_DOMAIN: 'dr-ynks.app.link',
   },
 
   owner: 'drynks15',
@@ -141,19 +126,21 @@ const config: ExpoConfig = {
     'expo-secure-store',
     'expo-image-picker',
     'expo-location',
-    // Sign in with Apple capability
     'expo-apple-authentication',
     [
       'expo-build-properties',
+      { ios: { useFrameworks: 'static', deploymentTarget: '17.0' } },
+    ],
+    'expo-notifications',
+
+    // ★ Branch config plugin (reads keys from EAS secrets)
+    [
+      'react-native-branch',
       {
-        ios: {
-          useFrameworks: 'static',
-          deploymentTarget: '17.0',
-        },
+        branchKey: process.env.BRANCH_KEY_LIVE,
+        branchKeyTest: process.env.BRANCH_KEY_TEST,
       },
     ],
-    // 👇 Required so iOS actually bundles notification capabilities
-    'expo-notifications',
   ],
 };
 
