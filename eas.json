@@ -1,6 +1,6 @@
 {
   "cli": {
-    "version": ">= 3.0.0",
+    "version": ">= 16.19.3",
     "appVersionSource": "local"
   },
 
@@ -11,7 +11,8 @@
       "channel": "development",
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
-        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+        "EXPO_PUBLIC_DISABLE_PUSH": "1",
+        "EXPO_PUBLIC_SAFE_BOOT": "1"
       }
     },
 
@@ -19,10 +20,10 @@
       "developmentClient": false,
       "distribution": "internal",
       "channel": "staging",
-      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
-        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+        "EXPO_PUBLIC_DISABLE_PUSH": "1",
+        "EXPO_PUBLIC_SAFE_BOOT": "1"
       }
     },
 
@@ -30,10 +31,13 @@
       "developmentClient": false,
       "distribution": "store",
       "channel": "production",
-      "autoIncrement": true,
+      "ios": {
+        "resourceClass": "m-medium"
+      },
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
-        "EXPO_PUBLIC_DISABLE_PUSH": "1"
+        "EXPO_PUBLIC_DISABLE_PUSH": "0",
+        "EXPO_PUBLIC_SAFE_BOOT": "1"
       }
     }
   },
