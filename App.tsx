@@ -164,7 +164,11 @@ export default function App() {
   // Capture invite deep links at boot (works for cold start + while running)
   useEffect(() => {
     const stop = initInviteDeepLinking();
-    return () => { try { (stop as any)?.(); } catch {} };
+    return () => {
+      try {
+        (stop as any)?.();
+      } catch {}
+    };
   }, []);
 
   // Unlock SafeEmitter shim after app becomes active & interactions flush
@@ -210,7 +214,8 @@ export default function App() {
 
   // Optional: refresh-token rotation hook (safe if missing)
   useEffect(() => {
-    let off: undefined | (() => void>);
+    /** @type {undefined | (() => void)} */
+    let off;
     try {
       const { attachQuickUnlockRotationListener } = require('@services/QuickUnlockService');
       off = attachQuickUnlockRotationListener();
