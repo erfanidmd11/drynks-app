@@ -26,7 +26,7 @@ type InviteRow = {
 
 type DateRow = {
   id: string;
-  host_id: string;
+  inviter_id: string;
   title: string;
   event_date?: string | null;
   location?: string | null;
@@ -102,7 +102,7 @@ export default function SentInvitesScreen() {
       if (dateIds.length) {
         const { data: dates, error: dErr } = await supabase
           .from('dates')
-          .select('id,host_id,title,event_date,location')
+          .select('id,inviter_id,title,event_date,location')
           .in('id', dateIds);
         if (dErr) throw dErr;
         datesById = new Map((dates ?? []).map((d) => [d.id, d]));

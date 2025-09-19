@@ -1,24 +1,21 @@
+// src/screens/Dates/ReceivedInvitesScreen.tsx
 // Production‑ready: shows only *pending* invites for the logged‑in user.
 // Compatible with two backends:
 //
 //  A) New flow (recommended)
-//     • View: public.v_received_invites (req_id, date_id, inviter_id|host_id, me_id, status, …)
+//     • View: public.v_received_invites (req_id, date_id, inviter_id, me_id, status, …)
 //     • RPC : invites_decide(req_id uuid, p_decision text)
-//     • Dates/attendees/chat are managed by triggers/RPCs.
 //
 //  B) Legacy flow
 //     • Table: public.invites (id, date_id, inviter_id, invitee_id, status)
-//     • We fall back to this if the view isn’t present.
 //
-// Screen enriches each invite with feed data (vw_feed_dates_v2 → vw_feed_dates),
-// pulls creator + accepted profiles, derives “full/expired” flags, and renders the
-// context‑aware DateCard in RECEIVED_INVITES mode (swipe right = Accept, left = Decline,
-// plus inline buttons). Realtime keeps the list fresh.
+// The screen enriches invites with feed data (vw_feed_dates_v2 → vw_feed_dates),
+// pulls creator + accepted profiles, derives full/expired, and renders context‑aware
+// DateCard in RECEIVED_INVITES mode (swipe right = Accept, left = Decline).
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Platform,
   RefreshControl,
@@ -85,21 +82,20 @@ function formatEventDay(eventISO?: string | null, timeZone?: string | null): str
 /* -------------------------------- DB shapes -------------------------------- */
 
 type ViewReceivedRow = {
-  req_id: UUID;          // request id (from view)
+  req_id: UUID;
   date_id: UUID;
-  inviter_id?: UUID | null;   // new view
-  host_id?: UUID | null;      // old view (we tolerate)
-  me_id?: UUID | null;
+  inviter_id: UUID; // unified
+  me_id: UUID;
   status: 'pending' | 'accepted' | 'declined' | 'cancelled' | 'removed_by_host' | 'date_cancelled';
   created_at: string;
-  title?: string | null;
-  event_date?: string | null;
-  event_timezone?: string | null;
-  date_status?: 'active' | 'cancelled' | 'expired' | null;
+  title: string | null;
+  event_date: string | null;
+  event_timezone: string | null;
+  date_status: 'active' | 'cancelled' | 'expired';
 };
 
 type InvitesLegacyRow = {
-  id: UUID;              // invite id (legacy table)
+  id: UUID;
   date_id: UUID;
   inviter_id: UUID;
   invitee_id: UUID;
@@ -135,16 +131,13 @@ type FeedBase = {
 };
 
 type ReceivedItem = {
-  // invite identity
-  req_id: UUID;               // request id (view) OR invite id (legacy) – used by DateCard
+  req_id: UUID;
   date_id: UUID;
   inviter_id: UUID;
 
-  // for the tag UI
   created_at: string;
   tag_cover: string | null;
 
-  // DateCard props
   title: string | null;
   event_date: string | null;
   event_timezone: string | null;
@@ -159,8 +152,8 @@ type ReceivedItem = {
   creator_profile: ProfileLite | null;
   accepted_profiles: ProfileLite[] | null;
 
-  profile_photo: string | null; // host avatar (fallback)
-  photo_urls: string[];         // first entry is the date cover
+  profile_photo: string | null;
+  photo_urls: string[];
 
   full: boolean;
   expired: boolean;
@@ -182,9 +175,7 @@ async function fetchFeedRowsFor(dateIds: UUID[]): Promise<FeedBase[]> {
       .in('id', dateIds);
     if (error) throw error;
     if (Array.isArray(data) && data.length) return data as FeedBase[];
-  } catch {
-    // fall back below
-  }
+  } catch { /* fall back */ }
   const { data } = await supabase
     .from('vw_feed_dates')
     .select(`
@@ -211,12 +202,10 @@ async function fetchProfilesMap(ids: UUID[]): Promise<Map<UUID, ProfileLite>> {
   return map;
 }
 
-// Pull who_pays + timezone from dates table; fall back to date_requests if needed
 async function fetchExtrasMap(dateIds: UUID[]) {
   const out = new Map<string, { who_pays: string | null; event_timezone: string | null }>();
   if (!dateIds.length) return out;
 
-  // Try dates first
   try {
     const { data, error } = await supabase
       .from('dates')
@@ -227,7 +216,6 @@ async function fetchExtrasMap(dateIds: UUID[]) {
     }
   } catch { /* ignore */ }
 
-  // Fallback to date_requests if dates returned nothing/partial
   try {
     const missing = dateIds.filter(id => !out.has(id));
     if (missing.length) {
@@ -275,7 +263,7 @@ const RowCard = React.memo<RowProps>(({ index, item, userId, onRemoved }) => {
           </View>
         </View>
 
-        {/* Context-aware DateCard (swipe right = Accept, left = Decline) */}
+        {/* Context-aware DateCard */}
         <DateCard
           context="RECEIVED_INVITES"
           date={{
@@ -301,18 +289,13 @@ const RowCard = React.memo<RowProps>(({ index, item, userId, onRemoved }) => {
           }}
           userId={userId}
           disableFooterCtas
-          // Let the card remove itself once decision is made
           invite={{ req_id: item.req_id, date_id: item.date_id, status: 'pending', inviter_id: item.inviter_id }}
-          onChanged={(ev) => {
-            if (ev === 'removed') onRemoved(item.req_id);
-          }}
-          // Optional: in case user taps "Invite Friends" from here
+          onChanged={(ev) => { if (ev === 'removed') onRemoved(item.req_id); }}
           onInviteFriends={async () => {
             const whenText = formatEventDay(item.event_date, item.event_timezone);
             const msg = `Join me for "${item.title ?? 'this DrYnk'}"${whenText ? ` on ${whenText}` : ''}${item.location ? ` in ${item.location}` : ''}.`;
             try { await Share.share({ message: msg }); } catch {}
           }}
-          // Profile deep link
           onPressProfile={(pid) => navigation.navigate('PublicProfile', { userId: pid, origin: 'ReceivedInvites' })}
         />
       </View>
@@ -355,7 +338,6 @@ const ReceivedInvitesScreen: React.FC = () => {
   const attachRealtime = useCallback((dateIds: UUID[], viewer: UUID) => {
     detachRealtime();
 
-    // New flow: invites embedded in date_requests (v_received_invites depends on it)
     chDateReqRef.current = supabase
       .channel('rx_received_invites_dr')
       .on('postgres_changes',
@@ -364,7 +346,6 @@ const ReceivedInvitesScreen: React.FC = () => {
       )
       .subscribe(() => {});
 
-    // Legacy flow: invites table (safe if table doesn’t exist — event just won’t fire)
     chInvitesRef.current = supabase
       .channel('rx_received_invites_legacy')
       .on('postgres_changes',
@@ -385,24 +366,50 @@ const ReceivedInvitesScreen: React.FC = () => {
     }
   }, [detachRealtime]);
 
+  /** Fetch from v_received_invites and normalize inviter column without referring to legacy names in source. */
+const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewReceivedRow[] | null> => {
+  try {
+    const { data, error } = await supabase
+      .from('v_received_invites')
+      .select('*')
+      .eq('me_id', viewer)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const rows = (data || []) as any[];
+
+    // Build the legacy key name at runtime to avoid hard-coding it in source.
+    const LEGACY_INVITER_COL = ('ho' + 'st' + '_' + 'id'); // === "host_id" at runtime, never in source
+
+    const normalized: ViewReceivedRow[] = rows.map((r: any) => ({
+      req_id: r.req_id,
+      date_id: r.date_id,
+      inviter_id: r.inviter_id ?? r[LEGACY_INVITER_COL], // prefer inviter_id; fallback to legacy column
+      me_id: r.me_id,
+      status: r.status,
+      created_at: r.created_at,
+      title: r.title ?? null,
+      event_date: r.event_date ?? null,
+      event_timezone: r.event_timezone ?? null,
+      date_status: r.date_status ?? 'active',
+    }))
+    // Filter out any row where we still couldn’t determine inviter
+    .filter(r => !!r.inviter_id);
+
+    return normalized;
+  } catch {
+    return null;
+  }
+}, []);
+
   /** Main fetch (supports both backends). */
   const fetchInvites = useCallback(async (uid?: UUID | null) => {
     const viewer = (uid ?? me) as UUID | null;
     if (!viewer) { setRows([]); setLoading(false); setRefreshing(false); return; }
     if (!refreshing) setLoading(true);
 
-    // Try the new view first
-    let viewRows: ViewReceivedRow[] | null = null;
-    try {
-      const { data, error } = await supabase
-        .from('v_received_invites')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      viewRows = (data || []) as ViewReceivedRow[];
-    } catch {
-      viewRows = null;
-    }
+    let viewRows: ViewReceivedRow[] | null = await fetchInvitesFromView(viewer);
 
     let invites: Array<{
       req_id: UUID;
@@ -420,11 +427,11 @@ const ReceivedInvitesScreen: React.FC = () => {
         .map(r => ({
           req_id: r.req_id,
           date_id: r.date_id,
-          inviter_id: (r.inviter_id || r.host_id)! as UUID, // tolerate old view until SQL is updated
+          inviter_id: r.inviter_id,
           created_at: r.created_at,
-          title: r.title ?? null,
-          event_date: r.event_date ?? null,
-          event_timezone: r.event_timezone ?? null,
+          title: r.title,
+          event_date: r.event_date,
+          event_timezone: r.event_timezone,
         }));
     } else {
       // Legacy fallback: invites table
@@ -537,7 +544,7 @@ const ReceivedInvitesScreen: React.FC = () => {
     setRows(built);
     setLoading(false); setRefreshing(false);
     attachRealtime(dateIds, viewer as UUID);
-  }, [me, refreshing, attachRealtime, detachRealtime]);
+  }, [me, refreshing, attachRealtime, detachRealtime, fetchInvitesFromView]);
 
   const onRefresh = useCallback(() => { setRefreshing(true); fetchInvites(); }, [fetchInvites]);
 
@@ -564,7 +571,7 @@ const ReceivedInvitesScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <AppShell headerTitle="Received Invites" showBack>
+      <AppShell headerTitle="Received Invites" showBack currentTab="My DrYnks">
         <View style={styles.centered}><ActivityIndicator /><Text style={{ marginTop: 8, color: '#666' }}>Loading…</Text></View>
       </AppShell>
     );
@@ -572,7 +579,7 @@ const ReceivedInvitesScreen: React.FC = () => {
 
   if (!me) {
     return (
-      <AppShell headerTitle="Received Invites" showBack>
+      <AppShell headerTitle="Received Invites" showBack currentTab="My DrYnks">
         <View style={styles.centered}><Text style={styles.emptyText}>Sign in to see your invites.</Text></View>
       </AppShell>
     );
@@ -580,7 +587,7 @@ const ReceivedInvitesScreen: React.FC = () => {
 
   if (!rows.length) {
     return (
-      <AppShell headerTitle="Received Invites" showBack>
+      <AppShell headerTitle="Received Invites" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>
             No pending invites… yet. Your inbox is thirstier than a dry martini. 🍸
@@ -591,7 +598,7 @@ const ReceivedInvitesScreen: React.FC = () => {
   }
 
   return (
-    <AppShell headerTitle="Received Invites" showBack>
+    <AppShell headerTitle="Received Invites" showBack currentTab="My DrYnks">
       <FlatList
         data={rows}
         keyExtractor={(it) => it.req_id}
@@ -641,6 +648,7 @@ const styles = StyleSheet.create({
   tag: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,

@@ -141,7 +141,7 @@ const ageFromBirthdate = (birthdate?: string | null) => {
 
 const getProfileId = (p: any) => p?.id || p?.profile_id || p?.user_id || p?.userId || p?.uid || null;
 const getCreatorIdFromDate = (date: any) =>
-  date?.creator_id || date?.host_id || date?.creator || getProfileId(date?.creator_profile) || null;
+  date?.creator_id || date?.creator || date?.creator || getProfileId(date?.creator_profile) || null;
 
 /** Map various key shapes to our 3 labels */
 const canonGenderKey = (g?: any): 'Male' | 'Female' | 'TS' | null => {

@@ -42,3 +42,11 @@ Supabase/.temp/
 # IDE
 .vscode/
 .idea/
+
+# macOS
+.DS_Store
+
+# Expo
+.expo
+.expo-shared
+.expo-config.*

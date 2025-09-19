@@ -157,7 +157,7 @@ export default function DateFeedScreen() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [openDropdown, setOpenDropdown] = useState(false);
-  const debouncedQuery = useDebouncedValue(locationName, 250);
+  const debouncedQuery = useDebouncedValue(locationName, 250); // ✅ single declaration
   const hasPlaces = useMemo(() => !!GOOGLE_KEY, [GOOGLE_KEY]);
   const didInitLocationRef = useRef(false);
 
@@ -801,7 +801,6 @@ export default function DateFeedScreen() {
   }, [userId, profile, ensurePinnedVisible]);
 
   // ===== Places autocomplete =====
-  const debouncedQuery = useDebouncedValue(locationName, 250);
   useEffect(() => {
     const q = debouncedQuery?.trim();
     if (!hasPlaces) { setSuggestions([]); setOpenDropdown(false); return; }
