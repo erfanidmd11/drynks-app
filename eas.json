@@ -1,6 +1,6 @@
 {
   "cli": {
-    "version": ">= 16.19.3",
+    "version": ">= 3.0.0",
     "appVersionSource": "local"
   },
 
@@ -12,7 +12,8 @@
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "1",
-        "EXPO_PUBLIC_SAFE_BOOT": "1"
+        "EXPO_PUBLIC_SAFE_BOOT": "1",
+        "BRANCH_KEY_TEST": "key_test_ntFhXmyX0fGFgunpqgifWdppvCe1vGUn"
       }
     },
 
@@ -37,7 +38,8 @@
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "0",
-        "EXPO_PUBLIC_SAFE_BOOT": "1"
+        "EXPO_PUBLIC_SAFE_BOOT": "1",
+        "BRANCH_KEY_LIVE": "key_live_fsti9bA18fJFfDdahY3FJoblqwo0EHF1"
       }
     }
   },
