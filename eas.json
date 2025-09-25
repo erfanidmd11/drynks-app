@@ -32,9 +32,16 @@
       "developmentClient": false,
       "distribution": "store",
       "channel": "production",
+
       "ios": {
         "resourceClass": "m-medium"
+        
       },
+
+      "android": {
+        "gradleCommand": ":app:bundleRelease"
+      },
+
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "0",
@@ -50,6 +57,9 @@
         "appleId": "admin@pivot.do",
         "ascAppId": "6747322650",
         "appleTeamId": "SUFCY3Z3B4"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./android-service-account.json"
       }
     }
   }

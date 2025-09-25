@@ -5,12 +5,11 @@ import { supabase } from '@config/supabase';
 
 const STORAGE_KEY = 'pending_invite_payload_v1';
 
-// Public config (safe to ship). You already polyfill URL in App.tsx.
+// Public config (safe to ship). Ensure a global URL polyfill is loaded in your app entry.
 const LINK_HOST =
   (process.env as any)?.EXPO_PUBLIC_LINK_HOST || 'dr-ynks.app.link'; // Branch/Firebase domain
 const FALLBACK_WEB =
   (process.env as any)?.EXPO_PUBLIC_MARKETING_URL || 'https://dr-ynks.com/download';
-const APP_SCHEME = (process.env as any)?.EXPO_PUBLIC_SCHEME || 'dr-ynks';
 
 type PendingPayload = { code: string; dateId?: string | null; inviterId?: string | null };
 
@@ -77,7 +76,9 @@ export async function createShareInviteLink(dateId: string, inviterId: string) {
 
   // 3) Generate a short link via Branch; otherwise use HTTPS fallback
   const branchUrl = await tryCreateBranchLink(code, dateId);
-  const httpsFallback = `https://${LINK_HOST}/invite/${encodeURIComponent(code)}?d=${encodeURIComponent(dateId)}`;
+  const httpsFallback = `https://${LINK_HOST}/invite/${encodeURIComponent(code)}?d=${encodeURIComponent(
+    dateId
+  )}`;
   return { url: branchUrl || httpsFallback, code };
 }
 
@@ -160,7 +161,9 @@ export function initInviteDeepLinking() {
   });
 
   return () => {
-    try { sub.remove(); } catch {}
+    try {
+      (sub as any)?.remove?.();
+    } catch {}
   };
 }
 
@@ -174,12 +177,16 @@ export async function consumePendingInviteAfterLogin(): Promise<{ dateId?: strin
     if (!raw) return null;
 
     let payload: PendingPayload | null = null;
-    try { payload = JSON.parse(raw) as PendingPayload; } catch { payload = null; }
+    try {
+      payload = JSON.parse(raw) as PendingPayload;
+    } catch {
+      payload = null;
+    }
     if (!payload?.code) return null;
 
     let dateId: string | null = null;
 
-    // 1) Prefer server RPC (you created public.claim_invite_code(text))
+    // 1) Prefer server RPC (public.claim_invite_code(text))
     try {
       const { data, error } = await supabase.rpc('claim_invite_code', { p_code: payload.code });
       if (!error && data) {
@@ -191,7 +198,7 @@ export async function consumePendingInviteAfterLogin(): Promise<{ dateId?: strin
       // ignore, fall back to client-side claim path if allowed
     }
 
-    // 2) Fallback: read from invite_links + insert join_request (requires permissive RLS)
+    // 2) Fallback: read from invite_links + upsert join_request (requires permissive RLS)
     if (!dateId) {
       const { data: linkRow } = await supabase
         .from('invite_links')
@@ -220,14 +227,16 @@ export async function consumePendingInviteAfterLogin(): Promise<{ dateId?: strin
             .update({ claimed_by: uid, claimed_at: new Date().toISOString() })
             .eq('code', payload.code);
 
-          // Create join_request to host (idempotent via onConflict)
+          // Idempotent join request via UPSERT (v2-friendly)
           if (host) {
             await supabase
               .from('join_requests')
-              .insert([{ date_id: got, requester_id: uid, recipient_id: host, status: 'pending' }])
-              .onConflict('date_id,requester_id')
-              .ignore();
+              .upsert(
+                [{ date_id: got, requester_id: uid, recipient_id: host, status: 'pending' }],
+                { onConflict: 'date_id,requester_id', ignoreDuplicates: true }
+              );
           }
+
           dateId = got;
         }
       }

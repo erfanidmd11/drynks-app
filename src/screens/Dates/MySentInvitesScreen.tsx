@@ -736,7 +736,7 @@ const MySentInvitesScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <AppShell headerTitle={headerTitle} showBack backTint="#000" currentTab="My DrYnks">
+     <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks"> 
         <View style={styles.centered}><ActivityIndicator /></View>
       </AppShell>
     );
@@ -744,7 +744,7 @@ const MySentInvitesScreen: React.FC = () => {
 
   if (!me) {
     return (
-      <AppShell headerTitle={headerTitle} showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>You’re signed out — sent invites live here once you’re back in. 🍹</Text>
           <TouchableOpacity onPress={() => { try { navigation.navigate('Login'); } catch {} }} style={[styles.ctaBtn, { backgroundColor: DRYNKS_RED }]}>
@@ -757,7 +757,7 @@ const MySentInvitesScreen: React.FC = () => {
 
   if (!rows.length) {
     return (
-      <AppShell headerTitle={headerTitle} showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyTitle}>No sent invites yet.</Text>
           <Text style={styles.emptySub}>Invite friends from your date card, or browse dates to get started.</Text>
@@ -775,7 +775,7 @@ const MySentInvitesScreen: React.FC = () => {
   }
 
   return (
-    <AppShell headerTitle={headerTitle} showBack backTint="#000" currentTab="My DrYnks">
+    <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
       <FlatList
         data={rows}
         keyExtractor={(it) => it.req_id}
@@ -807,6 +807,7 @@ const MySentInvitesScreen: React.FC = () => {
 /* --------------------------------- styles --------------------------------- */
 
 const styles = StyleSheet.create({
+  emptyText: { fontSize: 14, color: '#6B7280', textAlign: 'center' },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
 
   emptyTitle: { fontSize: 18, color: '#222', textAlign: 'center', marginBottom: 6, fontWeight: '700' },

@@ -1,4 +1,17 @@
+// app.config.js
 require('dotenv').config();
+
+/**
+ * Toggle "Expo Go" mode with EXPO_PUBLIC_USE_EXPO_GO=1
+ * - Disables custom Branch plugin + custom runtime so Expo Go can load the project.
+ * - Leaves everything else production-ready by default.
+ */
+const USE_EXPO_GO =
+  process.env.EXPO_PUBLIC_USE_EXPO_GO === '1' ||
+  process.env.EXPO_TARGET === 'expo';
+
+const DISABLE_BRANCH =
+  USE_EXPO_GO || process.env.EXPO_PUBLIC_DISABLE_BRANCH === '1';
 
 /** @type {import('@expo/config').ExpoConfig} */
 const expoConfig = {
@@ -19,23 +32,30 @@ const expoConfig = {
 
   assetBundlePatterns: ['**/*'],
 
-  updates: {
-    fallbackToCacheTimeout: 0,
-    url: 'https://u.expo.dev/c3eeca28-9032-43dd-bef7-7697e473ccb2',
-  },
+  // EAS Updates
+  // In Expo Go we turn updates off to avoid "custom runtime" targeting issues.
+  // In dev client / production we use the configured EAS Updates channel.
+  updates: USE_EXPO_GO
+    ? { enabled: false }
+    : {
+        url: 'https://u.expo.dev/c3eeca28-9032-43dd-bef7-7697e473ccb2',
+      },
 
-  runtimeVersion: '1.0.0',
+  // Custom runtime is only needed for dev-client / production builds.
+  // Expo Go uses SDK targeting via sdkVersion.
+  ...(USE_EXPO_GO ? {} : { runtimeVersion: { policy: 'appVersion' } }),
+  sdkVersion: '54.0.0',
 
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'com.drynks.app',
-    buildNumber: '2025091705',
+    buildNumber: '2025091714',
     usesAppleSignIn: true,
 
-    // Branch Associated Domains (Universal Links)
+    // Associated Domains needed for Branch deep links (has no effect in Expo Go).
     associatedDomains: [
       'applinks:dr-ynks.app.link',
-      'applinks:dr-ynks-alternate.app.link?mode=developer',
+      'applinks:dr-ynks-alternate.app.link',
     ],
 
     infoPlist: {
@@ -64,9 +84,7 @@ const expoConfig = {
   },
 
   android: {
-    // ⚠️ Keep "com.drynks.dev" if that’s your Play Console package.
-    // If you want to unify with iOS ("com.drynks.app"), update Play + Branch dashboard too.
-    package: 'com.drynks.dev',
+    package: 'com.drynks.dev', // adjust for production release when ready
     versionCode: 2,
 
     adaptiveIcon: {
@@ -85,7 +103,6 @@ const expoConfig = {
       'RECORD_AUDIO',
     ],
 
-    // Deep link filters (Branch + fallback scheme)
     intentFilters: [
       {
         action: 'VIEW',
@@ -110,41 +127,74 @@ const expoConfig = {
   web: { favicon: './assets/images/app_icon.png' },
 
   extra: {
+    // Server/client config
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY,
+
+    // Maps/Places
     GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
     EXPO_PUBLIC_GOOGLE_API_KEY: process.env.EXPO_PUBLIC_GOOGLE_API_KEY,
+
+    // Feature flags
     EXPO_PUBLIC_DISABLE_PUSH: process.env.EXPO_PUBLIC_DISABLE_PUSH ?? '0',
     EXPO_PUBLIC_DISABLE_BIOMETRICS: process.env.EXPO_PUBLIC_DISABLE_BIOMETRICS ?? '0',
     EXPO_PUBLIC_SAFE_BOOT: process.env.EXPO_PUBLIC_SAFE_BOOT ?? '1',
+
+    // Deep link + Branch flags (read by your app code)
+    EXPO_PUBLIC_USE_EXPO_GO: USE_EXPO_GO ? '1' : '0',
+    EXPO_PUBLIC_DISABLE_BRANCH: DISABLE_BRANCH ? '1' : '0',
     BRANCH_DOMAIN: 'dr-ynks.app.link',
+
+    // Your scheme/host (also in env.ts)
+    EXPO_PUBLIC_SCHEME: process.env.EXPO_PUBLIC_SCHEME || 'dr-ynks',
+    EXPO_PUBLIC_LINK_HOST: process.env.EXPO_PUBLIC_LINK_HOST || 'dr-ynks.app.link',
+    EXPO_PUBLIC_MARKETING_URL: process.env.EXPO_PUBLIC_MARKETING_URL || '',
+
+    // EAS
     eas: { projectId: 'c3eeca28-9032-43dd-bef7-7697e473ccb2' },
   },
 
   owner: 'drynks15',
   projectId: 'c3eeca28-9032-43dd-bef7-7697e473ccb2',
 
+  /**
+   * Plugins:
+   * - Keep only Expo Go–compatible plugins when USE_EXPO_GO is true.
+   * - Re-enable Branch + build properties automatically when USE_EXPO_GO is false
+   *   (dev client / production).
+   */
   plugins: [
+    'expo-font',
     'expo-splash-screen',
     'expo-secure-store',
     'expo-image-picker',
     'expo-location',
     'expo-apple-authentication',
-    [
-      'expo-build-properties',
-      { ios: { useFrameworks: 'static', deploymentTarget: '17.0' } },
-    ],
     'expo-notifications',
 
-    // Local Branch config plugin (injects keys into native)
-    [
-      './plugins/with-branch',
-      {
-        liveKey: process.env.BRANCH_KEY_LIVE,
-        testKey: process.env.BRANCH_KEY_TEST,
-        domains: ['dr-ynks.app.link', 'dr-ynks-alternate.app.link'],
-      },
-    ],
+    // Only apply native build tweaks when NOT running in Expo Go
+    ...(USE_EXPO_GO
+      ? []
+      : [
+          [
+            'expo-build-properties',
+            { ios: { useFrameworks: 'static', deploymentTarget: '15.1' } },
+          ],
+        ]),
+
+    // Custom Branch plugin (disabled in Expo Go)
+    ...(!DISABLE_BRANCH
+      ? [
+          [
+            './plugins/with-branch',
+            {
+              liveKey: process.env.BRANCH_KEY_LIVE,
+              testKey: process.env.BRANCH_KEY_TEST,
+              domains: ['dr-ynks.app.link', 'dr-ynks-alternate.app.link'],
+            },
+          ],
+        ]
+      : []),
   ],
 };
 

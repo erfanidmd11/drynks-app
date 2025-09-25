@@ -689,7 +689,7 @@ const ManageApplicantsScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <AppShell headerTitle="Manage Applicants" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="Manage Applicants" showBack currentTab="My DrYnks">
         <View style={styles.centered}><ActivityIndicator /></View>
       </AppShell>
     );
@@ -697,7 +697,7 @@ const ManageApplicantsScreen: React.FC = () => {
 
   if (!me) {
     return (
-      <AppShell headerTitle="Manage Applicants" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="Manage Applicants" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>Sign in to manage your applicants.</Text>
         </View>
@@ -707,7 +707,7 @@ const ManageApplicantsScreen: React.FC = () => {
 
   if (!rows.length) {
     return (
-      <AppShell headerTitle="Manage Applicants" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="Manage Applicants" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyTitle}>No applicants… yet.</Text>
           <Text style={styles.emptySub}>Throw a date and watch the RSVPs roll in. 🎣</Text>
@@ -717,7 +717,7 @@ const ManageApplicantsScreen: React.FC = () => {
   }
 
   return (
-    <AppShell headerTitle="Manage Applicants" showBack backTint="#000" currentTab="My DrYnks">
+    <AppShell headerTitle="Manage Applicants" showBack currentTab="My DrYnks">
       <FlatList
         data={rows}
         keyExtractor={(it) => it.row_id}

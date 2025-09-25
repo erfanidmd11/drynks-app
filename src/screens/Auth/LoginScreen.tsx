@@ -92,7 +92,7 @@ const LoginScreen: React.FC = () => {
 
   // Debug: log which Supabase project this build points at (ENV mismatches cause invalid-credentials)
   useEffect(() => {
-    // @ts-expect-error – not public API; safe for debug
+    
     const debugUrl: string | undefined = (supabase as any)?.rest?.url || (supabase as any)?.supabaseUrl;
     console.log('[Auth] Using Supabase URL:', debugUrl || '(unknown)');
   }, []);

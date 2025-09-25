@@ -5,7 +5,7 @@ import {
   type RouteProp,
   type NavigationProp,
 } from '@react-navigation/native';
-import type { RootStackParamList } from '@types/navigation';
+import type { RootStackParamList } from '../types/navigation';
 
 /** Typed version of useNavigation with all route names/params. */
 export function useNavigationTyped() {

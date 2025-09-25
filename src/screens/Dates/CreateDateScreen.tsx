@@ -2,7 +2,7 @@
 // Production-ready create date flow
 // - iOS inline calendar; Android calendar dialog
 // - City input is single-line, full width; "Choose My Current Location" is on its own line
-// - Autocomplete after 3 chars with sessiontoken + robust fallback chain (types=cities → general → findplace → geocode)
+// - Autocomplete after 3 chars with sessiontoken + robust fallback chain (cities → regions → general → findplace → geocode)
 // - DEV-only console diagnostics for Google status/error_message
 // - Insert-first, then update photos; strong placeholders; clears form after success
 
@@ -36,6 +36,7 @@ import { Ionicons } from '@expo/vector-icons';
 import tzlookup from 'tz-lookup';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { decode as atob } from 'base-64';
+import { GOOGLE_PLACES_KEY as GOOGLE_KEY, HAS_PLACES, PLACES_COUNTRIES } from '@config/env';
 
 // ---------- Theme
 const DRYNKS_RED = '#E34E5C';
@@ -46,18 +47,6 @@ const PLACEHOLDER = '#4B5563';
 
 // ---------- Config
 const DATE_BUCKET = 'date-photos';
-const GOOGLE_API_KEY: string =
-  (process.env.EXPO_PUBLIC_GOOGLE_API_KEY as string) ||
-  (process.env.GOOGLE_API_KEY as string) ||
-  '';
-
-// Optional: restrict autocomplete countries (comma-separated, e.g., "us,ca")
-const COUNTRIES: string[] = String(
-  (process.env as any)?.EXPO_PUBLIC_PLACES_COUNTRIES || ''
-)
-  .split(',')
-  .map((c) => c.trim().toLowerCase())
-  .filter(Boolean);
 
 // ---------- Date helper
 const safeZonedTimeToUtc = (d: Date, tz: string) => {
@@ -95,7 +84,7 @@ async function uploadToDateBucket(localUri: string, userId: string) {
 
   const path = `${userId}/${uuidv4()}.jpg`;
   const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
-    encoding: FileSystem.EncodingType.Base64,
+    encoding: 'base64',
   });
   const bytes = base64ToUint8Array(base64);
 
@@ -149,7 +138,7 @@ const LocationAutocomplete: React.FC<{
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRef = useRef<string>(uuidv4());
 
-  const canAutocomplete = Boolean(GOOGLE_API_KEY);
+  const canAutocomplete = HAS_PLACES;
 
   const resetSession = () => {
     sessionRef.current = uuidv4();
@@ -171,8 +160,8 @@ const LocationAutocomplete: React.FC<{
     debounceRef.current = setTimeout(async () => {
       const sessiontoken = sessionRef.current;
       const components =
-        COUNTRIES.length > 0 ? `&components=${COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
-      const common = `input=${encodeURIComponent(query)}&language=en&key=${GOOGLE_API_KEY}&sessiontoken=${sessiontoken}&locationbias=ipbias${components}`;
+        PLACES_COUNTRIES.length > 0 ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
+      const common = `input=${encodeURIComponent(query)}&language=en&key=${GOOGLE_KEY}&sessiontoken=${sessiontoken}&locationbias=ipbias${components}`;
 
       try {
         setLoading(true);
@@ -182,10 +171,8 @@ const LocationAutocomplete: React.FC<{
         let res = await fetch(url);
         let json = await res.json();
 
-        if (__DEV__) {
-          if (json?.status !== 'OK') {
-            console.warn('[Places A] status:', json?.status, json?.error_message);
-          }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places A] status:', json?.status, json?.error_message);
         }
 
         if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
@@ -195,15 +182,28 @@ const LocationAutocomplete: React.FC<{
           return;
         }
 
+        // A2) Regions (some accounts return better city-like hits here)
+        url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}&types=(regions)`;
+        res = await fetch(url);
+        json = await res.json();
+
+        if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
+          const filtered = json.predictions.filter(isCityPrediction);
+          const items = filtered.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          if (items.length) {
+            setSuggestions(items);
+            setOpen(true);
+            return;
+          }
+        }
+
         // B) General autocomplete, filter to cities
         url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}`;
         res = await fetch(url);
         json = await res.json();
 
-        if (__DEV__) {
-          if (json?.status !== 'OK') {
-            console.warn('[Places B] status:', json?.status, json?.error_message);
-          }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places B] status:', json?.status, json?.error_message);
         }
 
         if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
@@ -222,15 +222,13 @@ const LocationAutocomplete: React.FC<{
           `?input=${encodeURIComponent(query)}` +
           `&inputtype=textquery` +
           `&fields=place_id,formatted_address,name,geometry` +
-          `&key=${GOOGLE_API_KEY}` +
+          `&key=${GOOGLE_KEY}` +
           `&sessiontoken=${sessiontoken}`;
         res = await fetch(url);
         json = await res.json();
 
-        if (__DEV__) {
-          if (json?.status !== 'OK') {
-            console.warn('[Places C - FindPlace] status:', json?.status, json?.error_message);
-          }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places C - FindPlace] status:', json?.status, json?.error_message);
         }
 
         if (json?.status === 'OK' && Array.isArray(json?.candidates) && json.candidates.length) {
@@ -247,14 +245,12 @@ const LocationAutocomplete: React.FC<{
         url =
           `https://maps.googleapis.com/maps/api/geocode/json` +
           `?address=${encodeURIComponent(query)}` +
-          `&key=${GOOGLE_API_KEY}`;
+          `&key=${GOOGLE_KEY}`;
         res = await fetch(url);
         json = await res.json();
 
-        if (__DEV__) {
-          if (json?.status !== 'OK') {
-            console.warn('[Places D - Geocode] status:', json?.status, json?.error_message);
-          }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places D - Geocode] status:', json?.status, json?.error_message);
         }
 
         if (json?.status === 'OK' && Array.isArray(json?.results) && json.results.length) {
@@ -311,14 +307,12 @@ const LocationAutocomplete: React.FC<{
         `?place_id=${encodeURIComponent(place_id)}` +
         `&fields=geometry,address_components,formatted_address,name` +
         `&sessiontoken=${sessionRef.current}` +
-        `&key=${GOOGLE_API_KEY}`;
+        `&key=${GOOGLE_KEY}`;
       const res = await fetch(url);
       const json = await res.json();
 
-      if (__DEV__) {
-        if (json?.status !== 'OK') {
-          console.warn('[Places Details] status:', json?.status, json?.error_message);
-        }
+      if (__DEV__ && json?.status !== 'OK') {
+        console.warn('[Places Details] status:', json?.status, json?.error_message);
       }
 
       const r = json?.result;
@@ -422,15 +416,17 @@ const LocationAutocomplete: React.FC<{
                   </Text>
                 </TouchableOpacity>
               ))}
-              <View style={styles.poweredBy}>
-                <Text style={styles.poweredText}>Powered by Google</Text>
-              </View>
+              {HAS_PLACES && (
+                <View style={styles.poweredBy}>
+                  <Text style={styles.poweredText}>Powered by Google</Text>
+                </View>
+              )}
             </>
           )}
         </View>
       )}
 
-      {!GOOGLE_API_KEY && (
+      {!HAS_PLACES && (
         <Text style={{ color: '#9AA4AF', marginTop: 6 }}>
           Autocomplete disabled (missing EXPO_PUBLIC_GOOGLE_API_KEY)
         </Text>
@@ -516,7 +512,7 @@ const CreateDateScreen: React.FC = () => {
 
   // Form state
   const [title, setTitle] = useState('');
-  const [locationName, setLocationName] = useState('');
+  const [locationName, setLocationName] = useState(''); // ✅ fixed syntax
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const [date, setDate] = useState(new Date());
   const [photo, setPhoto] = useState<string | null>(null);
@@ -725,7 +721,7 @@ const CreateDateScreen: React.FC = () => {
       resetForm();
       await AsyncStorage.setItem(CLEAR_FLAG, '1');
 
-      // --- NEW: Navigate to Invite Nearby (fallback to My Dates if not found)
+      // Navigate to Invite Nearby (fallback to My Dates if not found)
       const didNav = goToInviteNearby(navigation, dateId);
       if (!didNav) {
         goToMyDatesTab(navigation);
@@ -806,10 +802,11 @@ const CreateDateScreen: React.FC = () => {
                   }}
                   style={{ alignSelf: 'stretch' }}
                   // ----- iOS color/readability fixes -----
-                  themeVariant="light"               // force light mode so text isn't white on white
-                  // @ts-ignore - present in newer types; ignored if not supported
-                  accentColor={DRYNKS_RED}           // selected day / control tint
-                  // @ts-ignore - may apply to spinner modes; safe no-op for inline on some iOS versions
+                  // @ts-ignore
+                  themeVariant="light"
+                  // @ts-ignore
+                  accentColor={DRYNKS_RED}
+                  // @ts-ignore
                   textColor="#111827"
                 />
               </View>

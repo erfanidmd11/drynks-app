@@ -604,7 +604,7 @@ const JoinRequestsScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <ActivityIndicator />
           <Text style={{ marginTop: 10, color: '#666' }}>Loading your join requests…</Text>
@@ -615,7 +615,7 @@ const JoinRequestsScreen: React.FC = () => {
 
   if (!me) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>You’re incognito—sign in to see your join requests. 🕵️‍♀️</Text>
         </View>
@@ -625,7 +625,7 @@ const JoinRequestsScreen: React.FC = () => {
 
   if (!tableReady) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>Join requests aren’t enabled in this environment yet.</Text>
         </View>
@@ -635,7 +635,7 @@ const JoinRequestsScreen: React.FC = () => {
 
   if (!rows.length) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack backTint="#000" currentTab="My DrYnks">
+      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <Text style={styles.emptyText}>
             No join requests on the board. Your social calendar is chilling on ice. 🧊
@@ -648,7 +648,7 @@ const JoinRequestsScreen: React.FC = () => {
   /* ---------------------------------- main ---------------------------------- */
 
   return (
-    <AppShell headerTitle="My Join Requests" showBack backTint="#000" currentTab="My DrYnks">
+    <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
       <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 6 }}>
         <Text style={{ textAlign: 'center', color: '#666' }}>
           Swipe <Text style={{ fontWeight: '800', color: DRYNKS_RED }}>← Left</Text> to cancel your request

@@ -4,10 +4,20 @@
 //  - Provide creator screenname/birthdate/preferences so DateCard can show Host name + age
 //  - Provide accepted_profiles with same fields so "Guest" slide shows name + age
 //  - Populate who_pays from date_requests so DateCard doesn't show "💸 Unknown"
-//  - NEW: If user comes in via an invite link we claimed after login, the linked date
-//         is fetched and **pinned to the top immediately**, and we scroll to it.
+//  - Invite link pinning: claimed invite is fetched and pinned + scroll to it.
+//  - ✅ Uses selected location (or current/profile) to compute distance_miles and filter by radius.
+//  - ✅ Location text filter uses the same state (locationName) and stays persisted.
+//  - ✅ Robust Places autocomplete with fallbacks; reads Google key via @config/env (manifest-safe).
+//  - ✅ Hydrates lat/lng from date_requests when views don’t include them.
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  memo,
+} from 'react';
 import {
   View,
   Text,
@@ -21,17 +31,30 @@ import {
   Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation, useRoute, CommonActions } from '@react-navigation/native';
+import {
+  useFocusEffect,
+  CommonActions,
+  type RouteProp,
+} from '@react-navigation/native';
+import {
+  type NativeStackScreenProps,
+} from '@react-navigation/native-stack';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { v4 as uuidv4 } from 'uuid';
+
 import AnimatedScreenWrapper from '@components/common/AnimatedScreenWrapper';
 import DateCard from '@components/cards/DateCard';
 import { tryPromptIfArmed } from '@services/QuickUnlockService';
 import { supabase } from '@config/supabase';
-
-// ⬇️ NEW: invite service — used to claim any pending deep-link and get date_id
 import { consumePendingInviteAfterLogin } from '@services/InviteLinks';
+import {
+  GOOGLE_PLACES_KEY as GOOGLE_KEY,
+  HAS_PLACES,
+  PLACES_COUNTRIES,
+} from '@config/env';
+
+import type { RootStackParamList } from '../../types/navigation';
 
 // ---- Theme
 const DRYNKS_BLUE = '#232F39';
@@ -74,8 +97,8 @@ type DateRow = {
   event_type: string | null;
   orientation_preference: string[] | null;
   distance_miles: number | null;
-  profile_photo: string | null; // creator/host avatar
-  photo_urls: string[];         // first image will be used as cover by DateCard
+  profile_photo: string | null;
+  photo_urls: string[];
   creator_id: UUID;
   creator_profile: ProfileHydrated | null;
   accepted_profiles: ProfileHydrated[] | null;
@@ -89,23 +112,26 @@ type DateRow = {
 
 const PAGE_SIZE = 10;
 
-// Helpers
+// --- Google Places
+type Suggestion = { description: string; place_id: string };
+const AUTOCOMPLETE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
+const DETAILS_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/details/json';
+const FINDPLACE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/findplacefromtext/json';
+const GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json';
+
+// ===== Types for screen props (matches AppNavigator's wrapper) =====
+type ScreenProps = NativeStackScreenProps<RootStackParamList, 'DateFeed'> & {
+  /** Optional override passed by the wrapper; mirrors route?.params?.scrollToDateId */
+  scrollToDateId?: string;
+};
+
+// ---- Helpers
 const looksLikeWKTOrHex = (s?: string | null) =>
   !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(String(s)));
 
 const hiddenKeyFor = (uid: string) => `hidden_dates_v1:${uid}`;
 
-// Google Places
-const GOOGLE_KEY =
-  (process.env as any)?.EXPO_PUBLIC_GOOGLE_API_KEY ||
-  (process.env as any)?.GOOGLE_API_KEY ||
-  '';
-
-type Suggestion = { description: string; place_id: string };
-const AUTOCOMPLETE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
-const DETAILS_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/details/json';
-
-// Debounce hook
+// Debounce
 function useDebouncedValue<T>(value: T, delay = 250) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -115,10 +141,65 @@ function useDebouncedValue<T>(value: T, delay = 250) {
   return debounced;
 }
 
-export default function DateFeedScreen() {
+// Distance
+const toRad = (x: number) => (x * Math.PI) / 180;
+function milesBetween(
+  aLat?: number | null,
+  aLng?: number | null,
+  bLat?: number | null,
+  bLng?: number | null
+) {
+  if (
+    aLat == null ||
+    aLng == null ||
+    bLat == null ||
+    bLng == null ||
+    Number.isNaN(+aLat) ||
+    Number.isNaN(+aLng) ||
+    Number.isNaN(+bLat) ||
+    Number.isNaN(+bLng)
+  )
+    return null;
+  const R = 3958.7613; // miles
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLng - aLng);
+  const la1 = toRad(aLat);
+  const la2 = toRad(bLat);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function parseWktPoint(
+  s?: string | null
+): { lat: number; lng: number } | null {
+  if (!s || !/^SRID=/i.test(s)) return null;
+  const m = /POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i.exec(s);
+  if (!m) return null;
+  const lon = parseFloat(m[1]);
+  const lat = parseFloat(m[2]);
+  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  return { lat, lng: lon };
+}
+
+// Keep only “city-like” predictions when we must use general autocomplete
+function isCityPrediction(p: any): boolean {
+  const t: string[] = Array.isArray(p?.types) ? p.types : [];
+  if (t.includes('locality')) return true;
+  if (
+    t.includes('administrative_area_level_3') ||
+    t.includes('administrative_area_level_2')
+  )
+    return true;
+  const commas = String(p?.description || '').split(',').length - 1;
+  return commas >= 1 && !t.includes('establishment');
+}
+
+const DateFeedScreen: React.FC<ScreenProps> = (props) => {
+  const { navigation, route, scrollToDateId } = props;
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation<any>();
-  const route = useRoute<any>();
   const flatListRef = useRef<FlatList<DateRow>>(null);
 
   // --- auth/profile ---
@@ -130,7 +211,7 @@ export default function DateFeedScreen() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
 
-  // 🔴 NEW: a one-off "pinned" item (invite claimed) — always shown on top this session
+  // 🔴 pinned (invite) —
   const [pinned, setPinned] = useState<DateRow | null>(null);
 
   // --- flags ---
@@ -145,21 +226,32 @@ export default function DateFeedScreen() {
   const [filtersLoaded, setFiltersLoaded] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [radius, setRadius] = useState('250');
-  const [filterText, setFilterText] = useState('');
-  const [sortBy, setSortBy] = useState<(typeof sortOptions)[number]>('Upcoming');
-  const [dateStateFilter, setDateStateFilter] = useState<(typeof stateOptions)[number]>('All');
-  const [selectedTypes, setSelectedTypes] = useState<string[]>(['group', 'one-on-one']);
+  const [filterText, setFilterText] = useState(''); // stays in sync with locationName
+  const [sortBy, setSortBy] =
+    useState<(typeof sortOptions)[number]>('Upcoming');
+  const [dateStateFilter, setDateStateFilter] =
+    useState<(typeof stateOptions)[number]>('All');
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([
+    'group',
+    'one-on-one',
+  ]);
   const [locationName, setLocationName] = useState('');
-  const [overrideCoords, setOverrideCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [overrideCoords, setOverrideCoords] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
 
   // Suggestions state
   const [sessionToken] = useState<string>(uuidv4());
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [openDropdown, setOpenDropdown] = useState(false);
-  const debouncedQuery = useDebouncedValue(locationName, 250); // ✅ single declaration
-  const hasPlaces = useMemo(() => !!GOOGLE_KEY, [GOOGLE_KEY]);
+  const debouncedQuery = useDebouncedValue(locationName, 250);
+  const hasPlaces = HAS_PLACES;
   const didInitLocationRef = useRef(false);
+
+  // The coordinates we used on the last fetch (for pagination consistency)
+  const lastCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
 
   // --- per-user hidden IDs ---
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
@@ -189,7 +281,8 @@ export default function DateFeedScreen() {
     if (map.radius) setRadius(map.radius);
     if (map.filterText) setFilterText(map.filterText);
     if (map.sortBy) setSortBy(map.sortBy as (typeof sortOptions)[number]);
-    if (map.dateStateFilter) setDateStateFilter(map.dateStateFilter as (typeof stateOptions)[number]);
+    if (map.dateStateFilter)
+      setDateStateFilter(map.dateStateFilter as (typeof stateOptions)[number]);
     if (map.selectedTypes) setSelectedTypes(JSON.parse(map.selectedTypes));
     if (map.locationName) {
       setLocationName(map.locationName);
@@ -198,12 +291,11 @@ export default function DateFeedScreen() {
     setFiltersLoaded(true);
   }, []);
 
-  // Load filters on mount
   useEffect(() => {
     loadFilters();
   }, [loadFilters]);
 
-  // Load hidden IDs when userId known
+  // Hidden cache
   const loadHidden = useCallback(async (uid: string) => {
     try {
       const raw = await AsyncStorage.getItem(hiddenKeyFor(uid));
@@ -213,30 +305,44 @@ export default function DateFeedScreen() {
       setHiddenIds(new Set());
     }
   }, []);
-
   const saveHidden = useCallback(async (uid: string, nextSet: Set<string>) => {
     try {
-      await AsyncStorage.setItem(hiddenKeyFor(uid), JSON.stringify(Array.from(nextSet)));
+      await AsyncStorage.setItem(
+        hiddenKeyFor(uid),
+        JSON.stringify(Array.from(nextSet))
+      );
     } catch {
-      // ignore
+      // no-op
     }
   }, []);
 
   // ----- geocode helpers -----
   const reverseGeocodeToCity = useCallback(async (lat: number, lng: number) => {
     try {
-      const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
-      const city = results?.[0]?.city || results?.[0]?.subregion || results?.[0]?.region;
+      const results = await Location.reverseGeocodeAsync({
+        latitude: lat,
+        longitude: lng,
+      });
+      const city =
+        results?.[0]?.city ||
+        results?.[0]?.subregion ||
+        results?.[0]?.region;
       if (city) {
         setLocationName(city);
-        await AsyncStorage.setItem('locationName', city);
+        setFilterText(city); // keep in sync for string filter
+        await AsyncStorage.multiSet([
+          ['locationName', city],
+          ['filterText', city],
+        ]);
       }
     } catch {
       // ignore
     }
   }, []);
 
-  const refreshListRef = useRef<null | ((coords?: { lat: number; lng: number }) => Promise<void>)>(null);
+  const refreshListRef = useRef<
+    null | ((coords?: { lat: number; lng: number }) => Promise<void>)
+  >(null);
 
   const getCurrentLocation = useCallback(async () => {
     try {
@@ -249,21 +355,27 @@ export default function DateFeedScreen() {
       setOverrideCoords({ lat: coords.latitude, lng: coords.longitude });
       await reverseGeocodeToCity(coords.latitude, coords.longitude);
       await persistFilters();
-      if (userId && profile) refreshListRef.current?.({ lat: coords.latitude, lng: coords.longitude });
+      if (userId && profile)
+        refreshListRef.current?.({
+          lat: coords.latitude,
+          lng: coords.longitude,
+        });
     } catch {
       Alert.alert('Location Error', 'Could not fetch your location.');
     }
   }, [persistFilters, profile, reverseGeocodeToCity, userId]);
 
-  // ----- session/profile hydrate (single-init location) -----
+  // ----- session/profile hydrate -----
   const hydrateSession = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
     if (!session?.user) {
       setUserId(null);
       setProfile(null);
       setDates([]);
-      setPinned(null); // clear any session pin
+      setPinned(null);
       setHiddenIds(new Set());
       setLoadingInitial(false);
       setRefreshing(false);
@@ -278,7 +390,9 @@ export default function DateFeedScreen() {
 
     const { data: prof } = await supabase
       .from('profiles')
-      .select('id, gender, orientation, latitude, longitude, location, profile_photo')
+      .select(
+        'id, gender, orientation, latitude, longitude, location, profile_photo'
+      )
       .eq('id', uid)
       .single();
 
@@ -287,10 +401,20 @@ export default function DateFeedScreen() {
       if (!didInitLocationRef.current) {
         if ((prof as Profile).location) {
           setLocationName((prof as Profile).location as string);
-          await AsyncStorage.setItem('locationName', (prof as Profile).location as string);
+          setFilterText((prof as Profile).location as string);
+          await AsyncStorage.multiSet([
+            ['locationName', (prof as Profile).location as string],
+            ['filterText', (prof as Profile).location as string],
+          ]);
           didInitLocationRef.current = true;
-        } else if ((prof as Profile).latitude != null && (prof as Profile).longitude != null) {
-          await reverseGeocodeToCity((prof as Profile).latitude!, (prof as Profile).longitude!);
+        } else if (
+          (prof as Profile).latitude != null &&
+          (prof as Profile).longitude != null
+        ) {
+          await reverseGeocodeToCity(
+            (prof as Profile).latitude!,
+            (prof as Profile).longitude!
+          );
           didInitLocationRef.current = true;
         }
       }
@@ -301,15 +425,16 @@ export default function DateFeedScreen() {
     hydrateSession();
   }, [hydrateSession]);
 
-  // Re-hydrate on auth state changes
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(() => {
       hydrateSession();
     });
-    return () => sub.subscription?.unsubscribe();
+    return () => subscription.unsubscribe();
   }, [hydrateSession]);
 
-  // ======= FaceID / TouchID prompt on first arrival =======
+  // ======= QuickUnlock prompt =======
   useEffect(() => {
     (async () => {
       const didPrompt = await tryPromptIfArmed(async (refresh_token) => {
@@ -323,7 +448,7 @@ export default function DateFeedScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ======= FETCHING =======
+  // ======= FETCHING & DISTANCE =======
   const canQuery = useMemo(() => !!userId && !!profile, [userId, profile]);
 
   const isPast = (d: DateRow) => {
@@ -334,282 +459,415 @@ export default function DateFeedScreen() {
   const isFull = (d: DateRow) => {
     const rgc = d.remaining_gender_counts;
     if (!rgc || typeof rgc !== 'object') return false;
-    const vals = Object.values(rgc).filter(v => typeof v === 'number');
+    const vals = Object.values(rgc).filter((v) => typeof v === 'number');
     if (vals.length === 0) return false;
-    return vals.every(v => v === 0);
+    return vals.every((v) => v === 0);
   };
 
-  // derive viewer's gender (not used for filtering anymore, but we keep it if needed later)
-  const getViewerGender = useCallback(() => {
-    const g = (profile?.gender ?? profile?.orientation ?? '').toString().trim();
-    return g ? g.toLowerCase() : '';
-  }, [profile]);
-
-  /** Helper: fetch a single date (robustly) and map to DateRow (same as feed rows). */
-  const fetchSingleDateRow = useCallback(async (dateId: string): Promise<DateRow | null> => {
-    // (a) try v2
-    let base: any | null = null;
-    try {
-      const { data, error } = await supabase
-        .from('vw_feed_dates_v2')
-        .select(`
-          id, creator, event_type, event_date, location, created_at,
-          accepted_users, orientation_preference, spots, remaining_gender_counts,
-          photo_urls, profile_photo, date_cover, creator_photo
-        `)
-        .eq('id', dateId)
-        .limit(1);
-      if (!error && Array.isArray(data) && data.length) base = data[0];
-    } catch {/* ignore */}
-
-    // (b) v1
-    if (!base) {
-      try {
-        const { data, error } = await supabase
-          .from('vw_feed_dates')
-          .select(`
-            id, creator, event_type, event_date, location, created_at,
-            accepted_users, orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo
-          `)
-          .eq('id', dateId)
-          .limit(1);
-        if (!error && Array.isArray(data) && data.length) base = data[0];
-      } catch {/* ignore */}
-    }
-
-    // (c) fallback from source tables
-    if (!base) {
+  // Pull lat/lng for missing rows from date_requests
+  const hydrateLatLng = useCallback(
+    async (
+      ids: string[],
+      existing: Map<string, { lat: number | null; lng: number | null }>
+    ) => {
+      const missing = ids.filter((id) => !existing.has(id));
+      if (!missing.length) return existing;
       try {
         const { data } = await supabase
           .from('date_requests')
-          .select(`
-            id, creator, event_type, event_date, location, created_at,
-            orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo
-          `)
+          .select('id, latitude, longitude')
+          .in('id', missing);
+        (data || []).forEach((r: any) => {
+          const lat = typeof r.latitude === 'number' ? r.latitude : null;
+          const lng = typeof r.longitude === 'number' ? r.longitude : null;
+          existing.set(r.id, { lat, lng });
+        });
+      } catch {
+        // ignore
+      }
+      return existing;
+    },
+    []
+  );
+
+  /** Helper: fetch a single date and map (for pinning) */
+  const fetchSingleDateRow = useCallback(
+    async (dateId: string): Promise<DateRow | null> => {
+      let base: any | null = null;
+      try {
+        const { data, error } = await supabase
+          .from('vw_feed_dates_v2')
+          .select(
+            `
+          id, creator, event_type, event_date, location, created_at,
+          accepted_users, orientation_preference, spots, remaining_gender_counts,
+          photo_urls, profile_photo, date_cover, creator_photo
+        `
+          )
           .eq('id', dateId)
           .limit(1);
-        if (Array.isArray(data) && data.length) base = data[0];
-      } catch {/* ignore */}
-    }
-    if (!base) {
+        if (!error && Array.isArray(data) && data.length) base = data[0];
+      } catch {
+        // ignore
+      }
+      if (!base) {
+        try {
+          const { data, error } = await supabase
+            .from('vw_feed_dates')
+            .select(
+              `
+            id, creator, event_type, event_date, location, created_at,
+            accepted_users, orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `
+            )
+            .eq('id', dateId)
+            .limit(1);
+          if (!error && Array.isArray(data) && data.length) base = data[0];
+        } catch {
+          // ignore
+        }
+      }
+      if (!base) {
+        try {
+          const { data } = await supabase
+            .from('date_requests')
+            .select(
+              `
+            id, creator, event_type, event_date, location, created_at,
+            latitude, longitude,
+            orientation_preference, spots, remaining_gender_counts,
+            photo_urls, profile_photo
+          `
+            )
+            .eq('id', dateId)
+            .limit(1);
+          if (Array.isArray(data) && data.length) base = data[0];
+        } catch {
+          // ignore
+        }
+      }
+      if (!base) return null;
+
+      let whoPays: string | null = null;
       try {
         const { data } = await supabase
-          .from('dates')
-          .select(`
-            id, creator, event_type, event_date, location, created_at,
-            orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo
-          `)
+          .from('date_requests')
+          .select('id, who_pays')
           .eq('id', dateId)
           .limit(1);
-        if (Array.isArray(data) && data.length) base = data[0];
-      } catch {/* ignore */}
-    }
-    if (!base) return null;
+        if (Array.isArray(data) && data.length)
+          whoPays = (data[0] as any).who_pays ?? null;
+      } catch {
+        // ignore
+      }
+      if (whoPays == null) {
+        try {
+          const { data } = await supabase
+            .from('dates')
+            .select('id, who_pays')
+            .eq('id', dateId)
+            .limit(1);
+          if (Array.isArray(data) && data.length)
+            whoPays = (data[0] as any).who_pays ?? null;
+        } catch {
+          // ignore
+        }
+      }
 
-    // Enrich: who_pays + profiles
-    let whoPays: string | null = null;
-    try {
-      const { data } = await supabase.from('date_requests').select('id, who_pays').eq('id', dateId).limit(1);
-      if (Array.isArray(data) && data.length) whoPays = (data[0] as any).who_pays ?? null;
-    } catch {/* ignore */}
-    if (whoPays == null) {
+      const creatorId = base.creator as string | undefined;
+      const accIds: string[] = Array.isArray(base.accepted_users)
+        ? base.accepted_users
+        : [];
+
+      let creator_profile: ProfileHydrated | null = null;
+      const acceptedMap = new Map<string, ProfileHydrated>();
+      const toSelect =
+        'id, screenname, birthdate, gender, orientation, profile_photo, location, preferences';
       try {
-        const { data } = await supabase.from('dates').select('id, who_pays').eq('id', dateId).limit(1);
-        if (Array.isArray(data) && data.length) whoPays = (data[0] as any).who_pays ?? null;
-      } catch {/* ignore */}
-    }
-
-    const creatorId = base.creator as string | undefined;
-    const accIds: string[] = Array.isArray(base.accepted_users) ? base.accepted_users : [];
-
-    let creator_profile: ProfileHydrated | null = null;
-    const acceptedMap = new Map<string, ProfileHydrated>();
-
-    const toSelect = 'id, screenname, birthdate, gender, orientation, profile_photo, location, preferences';
-    try {
-      if (creatorId) {
-        const { data } = await supabase.from('profiles').select(toSelect).in('id', [creatorId]);
-        if (Array.isArray(data) && data.length) creator_profile = data[0] as any;
+        if (creatorId) {
+          const { data } = await supabase
+            .from('profiles')
+            .select(toSelect)
+            .in('id', [creatorId]);
+          if (Array.isArray(data) && data.length)
+            creator_profile = data[0] as any;
+        }
+        if (accIds.length) {
+          const { data } = await supabase
+            .from('profiles')
+            .select(toSelect)
+            .in('id', accIds);
+          (data || []).forEach((p: any) =>
+            acceptedMap.set(p.id, p as ProfileHydrated)
+          );
+        }
+      } catch {
+        // ignore
       }
-      if (accIds.length) {
-        const { data } = await supabase.from('profiles').select(toSelect).in('id', accIds);
-        (data || []).forEach((p: any) => acceptedMap.set(p.id, p as ProfileHydrated));
+
+      // lat/lng fallback chain
+      let lat: number | null =
+        typeof base.latitude === 'number' ? base.latitude : null;
+      let lng: number | null =
+        typeof base.longitude === 'number' ? base.longitude : null;
+      if ((lat == null || lng == null) && looksLikeWKTOrHex(base.location)) {
+        const parsed = parseWktPoint(base.location);
+        if (parsed) {
+          lat = parsed.lat;
+          lng = parsed.lng;
+        }
+      } else if (lat == null || lng == null) {
+        try {
+          const { data } = await supabase
+            .from('date_requests')
+            .select('latitude, longitude')
+            .eq('id', dateId)
+            .limit(1);
+          if (Array.isArray(data) && data.length) {
+            lat =
+              typeof data[0].latitude === 'number' ? data[0].latitude : null;
+            lng =
+              typeof data[0].longitude === 'number' ? data[0].longitude : null;
+          }
+        } catch {
+          // ignore
+        }
       }
-    } catch {/* ignore */}
 
-    const cleanLoc = !looksLikeWKTOrHex(base.location)
-      ? base.location
-      : (creator_profile?.location ?? null);
+      const viewer =
+        lastCoordsRef.current ||
+        overrideCoords ||
+        (profile?.latitude != null && profile?.longitude != null
+          ? { lat: profile.latitude!, lng: profile.longitude! }
+          : null);
+      const distance =
+        viewer && lat != null && lng != null
+          ? milesBetween(viewer.lat, viewer.lng, lat, lng)
+          : null;
 
-    const cover: string | null =
-      base.date_cover ||
-      (Array.isArray(base.photo_urls) && base.photo_urls[0]) ||
-      base.profile_photo ||
-      base.creator_photo ||
-      creator_profile?.profile_photo ||
-      null;
+      const cleanLoc = !looksLikeWKTOrHex(base.location)
+        ? base.location
+        : creator_profile?.location ?? null;
 
-    const photo_urls: string[] =
-      Array.isArray(base.photo_urls) && base.photo_urls.length ? base.photo_urls : (cover ? [cover] : []);
+      const cover: string | null =
+        base.date_cover ||
+        (Array.isArray(base.photo_urls) && base.photo_urls[0]) ||
+        base.profile_photo ||
+        base.creator_photo ||
+        creator_profile?.profile_photo ||
+        null;
 
-    const accepted_profiles: ProfileHydrated[] | null =
-      accIds.length ? accIds.map((id) => acceptedMap.get(id)).filter(Boolean) as ProfileHydrated[] : null;
+      const photo_urls: string[] =
+        Array.isArray(base.photo_urls) && base.photo_urls.length
+          ? base.photo_urls
+          : cover
+          ? [cover]
+          : [];
 
-    return {
-      id: base.id,
-      title: base.title ?? base.event_type ?? null,
-      event_date: base.event_date ?? null,
-      who_pays: whoPays ?? null,
-      event_type: base.event_type ?? null,
-      orientation_preference: Array.isArray(base.orientation_preference) ? base.orientation_preference : null,
-      distance_miles: null,
-      profile_photo: creator_profile?.profile_photo ?? base.profile_photo ?? null,
-      photo_urls,
-      creator_id: base.creator,
-      creator_profile,
-      accepted_profiles,
-      created_at: base.created_at ?? null,
-      latitude: null,
-      longitude: null,
-      location: cleanLoc,
-      spots: base.spots ?? null,
-      remaining_gender_counts: base.remaining_gender_counts ?? null,
-    } as DateRow;
-  }, []);
+      const accepted_profiles: ProfileHydrated[] | null = accIds.length
+        ? (accIds
+            .map((id) => acceptedMap.get(id))
+            .filter(Boolean) as ProfileHydrated[])
+        : null;
+
+      return {
+        id: base.id,
+        title: base.title ?? base.event_type ?? null,
+        event_date: base.event_date ?? null,
+        who_pays: whoPays ?? null,
+        event_type: base.event_type ?? null,
+        orientation_preference: Array.isArray(base.orientation_preference)
+          ? base.orientation_preference
+          : null,
+        distance_miles: distance,
+        profile_photo:
+          creator_profile?.profile_photo ?? base.profile_photo ?? null,
+        photo_urls,
+        creator_id: base.creator,
+        creator_profile,
+        accepted_profiles,
+        created_at: base.created_at ?? null,
+        latitude: lat,
+        longitude: lng,
+        location: cleanLoc,
+        spots: base.spots ?? null,
+        remaining_gender_counts: base.remaining_gender_counts ?? null,
+      } as DateRow;
+    },
+    [overrideCoords, profile]
+  );
 
   /**
-   * Try v2 view first (richer fields), fall back to v1 if unavailable or if any unknown-column error occurs.
-   * Then enrich rows with creator/accepted profiles + who_pays from source table.
+   * Fetch a page; compute distance using coordsOverride or last known/viewer coords.
    */
   const fetchPage = useCallback(
-    async (pageArg: number, _coords?: { lat: number; lng: number }) => {
+    async (pageArg: number, coordsOverride?: { lat: number; lng: number }) => {
       if (!canQuery) return { rows: [] as DateRow[], pageUsed: pageArg };
+
+      // decide coords for this fetch and remember for pagination
+      const viewer =
+        coordsOverride ??
+        lastCoordsRef.current ??
+        overrideCoords ??
+        (profile?.latitude != null && profile?.longitude != null
+          ? { lat: profile.latitude!, lng: profile.longitude! }
+          : null);
+
+      lastCoordsRef.current = viewer || null;
 
       const rangeFrom = (pageArg - 1) * PAGE_SIZE;
       const rangeTo = rangeFrom + PAGE_SIZE - 1;
       const nowIso = new Date().toISOString();
 
-      // 1) Attempt v2
+      // Try v2 first; if error (e.g., view missing), fall back to v1
       let base: any[] = [];
-      let usedV2 = false;
       try {
         const { data, error } = await supabase
           .from('vw_feed_dates_v2')
-          .select(`
+          .select(
+            `
             id, creator, event_type, event_date, location, created_at,
             accepted_users, orientation_preference, spots, remaining_gender_counts,
             photo_urls, profile_photo,
-            date_cover, creator_photo, accepted_profile_photos
-          `)
+            date_cover, creator_photo
+          `
+          )
           .gte('event_date', nowIso)
           .neq('creator', userId!)
           .order('event_date', { ascending: true })
           .range(rangeFrom, rangeTo);
-
         if (error) throw error;
         base = data ?? [];
-        usedV2 = true;
       } catch {
-        // 2) Fallback to v1
         const { data, error } = await supabase
           .from('vw_feed_dates')
-          .select(`
+          .select(
+            `
             id, creator, event_type, event_date, location, created_at,
             accepted_users, orientation_preference, spots, remaining_gender_counts,
             photo_urls, profile_photo
-          `)
+          `
+          )
           .gte('event_date', nowIso)
           .neq('creator', userId!)
           .order('event_date', { ascending: true })
           .range(rangeFrom, rangeTo);
-
         if (error) throw error;
         base = data ?? [];
-        usedV2 = false;
       }
 
       if (!base.length) {
         return { rows: [], pageUsed: pageArg };
       }
 
-      // Collect ids for enrichment
-      const dateIds: string[] = base.map(r => r.id).filter(Boolean);
-      const creatorIds = Array.from(new Set(base.map(r => r.creator))).filter(Boolean);
+      // Collect ids
+      const dateIds: string[] = base.map((r) => r.id).filter(Boolean);
+      const creatorIds = Array.from(
+        new Set(base.map((r) => r.creator))
+      ).filter(Boolean);
       const acceptedIds = Array.from(
         new Set(
-          base.flatMap(r =>
+          base.flatMap((r) =>
             Array.isArray(r.accepted_users) ? r.accepted_users : []
           )
         )
       ).filter(Boolean);
 
-      // 3) Enrich with creator profiles
-      let creatorsById = new Map<string, ProfileHydrated>();
+      // Hydrate profiles
+      const creatorsById = new Map<string, ProfileHydrated>();
       if (creatorIds.length) {
-        const { data: creators, error: cErr } = await supabase
+        const { data: creators } = await supabase
           .from('profiles')
-          .select('id, screenname, birthdate, gender, orientation, profile_photo, location, preferences')
+          .select(
+            'id, screenname, birthdate, gender, orientation, profile_photo, location, preferences'
+          )
           .in('id', creatorIds);
-        if (!cErr && creators) {
-          creatorsById = new Map((creators as ProfileHydrated[]).map((p) => [p.id, p]));
-        }
+        (creators || []).forEach((p: any) =>
+          creatorsById.set(p.id, p as ProfileHydrated)
+        );
       }
 
-      // 4) Enrich with accepted profiles
-      let acceptedById = new Map<string, ProfileHydrated>();
+      const acceptedById = new Map<string, ProfileHydrated>();
       if (acceptedIds.length) {
-        const { data: accs, error: aErr } = await supabase
+        const { data: accs } = await supabase
           .from('profiles')
-          .select('id, screenname, birthdate, gender, orientation, profile_photo, location, preferences')
+          .select(
+            'id, screenname, birthdate, gender, orientation, profile_photo, location, preferences'
+          )
           .in('id', acceptedIds);
-        if (!aErr && accs) {
-          acceptedById = new Map((accs as ProfileHydrated[]).map((p) => [p.id, p]));
-        }
+        (accs || []).forEach((p: any) =>
+          acceptedById.set(p.id, p as ProfileHydrated)
+        );
       }
 
-      // 5) who_pays
-      let whoPaysById = new Map<string, string | null>();
+      // who_pays
+      const whoPaysById = new Map<string, string | null>();
       if (dateIds.length) {
         const { data: meta } = await supabase
           .from('date_requests')
           .select('id, who_pays')
           .in('id', dateIds);
-        if (meta?.length) {
-          whoPaysById = new Map(meta.map((r: any) => [r.id, r.who_pays ?? null]));
-        }
+        (meta || []).forEach((r: any) =>
+          whoPaysById.set(r.id, r.who_pays ?? null)
+        );
       }
 
-      // 6) Map to DateRow
+      // lat/lng map (from WKT or additional fetch)
+      const latLngById = new Map<
+        string,
+        { lat: number | null; lng: number | null }
+      >();
+      base.forEach((r: any) => {
+        let lat: number | null =
+          typeof r.latitude === 'number' ? r.latitude : null;
+        let lng: number | null =
+          typeof r.longitude === 'number' ? r.longitude : null;
+        if ((lat == null || lng == null) && looksLikeWKTOrHex(r.location)) {
+          const parsed = parseWktPoint(r.location);
+          if (parsed) {
+            lat = parsed.lat;
+            lng = parsed.lng;
+          }
+        }
+        if (lat != null || lng != null) latLngById.set(r.id, { lat, lng });
+      });
+      await hydrateLatLng(dateIds, latLngById);
+
+      // Map to DateRow + compute distance
       const mapped: DateRow[] = base.map((r: any) => {
         const creator_profile = creatorsById.get(r.creator) ?? null;
 
         const cleanLoc = !looksLikeWKTOrHex(r.location)
           ? r.location
-          : (creator_profile?.location ?? null);
+          : creator_profile?.location ?? null;
 
-        const cover: string | null = usedV2
-          ? (r.date_cover ||
-             (Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
-             r.profile_photo ||
-             r.creator_photo ||
-             creator_profile?.profile_photo ||
-             null)
-          : ((Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
-             r.profile_photo ||
-             creator_profile?.profile_photo ||
-             null);
+        const cover: string | null =
+          (Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
+          r.profile_photo ||
+          creator_profile?.profile_photo ||
+          null;
 
         const photo_urls: string[] =
           Array.isArray(r.photo_urls) && r.photo_urls.length
             ? r.photo_urls
-            : (cover ? [cover] : []);
+            : cover
+            ? [cover]
+            : [];
 
-        const accepted_profiles: ProfileHydrated[] | null = Array.isArray(r.accepted_users)
-          ? r.accepted_users.map((uid: string) => acceptedById.get(uid)).filter(Boolean) as ProfileHydrated[]
+        const accepted_profiles: ProfileHydrated[] | null = Array.isArray(
+          r.accepted_users
+        )
+          ? (r.accepted_users
+              .map((uid: string) => acceptedById.get(uid))
+              .filter(Boolean) as ProfileHydrated[])
           : null;
+
+        const latlng = latLngById.get(r.id) ?? { lat: null, lng: null };
+        const distance =
+          viewer && latlng.lat != null && latlng.lng != null
+            ? milesBetween(viewer.lat, viewer.lng, latlng.lat, latlng.lng)
+            : null;
 
         return {
           id: r.id,
@@ -617,23 +875,27 @@ export default function DateFeedScreen() {
           event_date: r.event_date ?? null,
           who_pays: whoPaysById.get(r.id) ?? null,
           event_type: r.event_type ?? null,
-          orientation_preference: Array.isArray(r.orientation_preference) ? r.orientation_preference : null,
-          distance_miles: null,
-          profile_photo: creator_profile?.profile_photo ?? r.profile_photo ?? null,
+          orientation_preference: Array.isArray(r.orientation_preference)
+            ? r.orientation_preference
+            : null,
+          distance_miles: distance,
+          profile_photo:
+            creator_profile?.profile_photo ?? r.profile_photo ?? null,
           photo_urls,
           creator_id: r.creator,
           creator_profile,
           accepted_profiles,
           created_at: r.created_at ?? null,
-          latitude: null,
-          longitude: null,
+          latitude: latlng.lat,
+          longitude: latlng.lng,
           location: cleanLoc,
           spots: r.spots ?? null,
           remaining_gender_counts: r.remaining_gender_counts ?? null,
         };
       });
 
-      // 7) Client filters
+      // Client filters
+      const locationTerm = (locationName || filterText || '').trim();
       const filtered = mapped.filter((d) => {
         if (hiddenIds.has(String(d.id))) return false;
 
@@ -647,15 +909,19 @@ export default function DateFeedScreen() {
               (selectedTypes.includes('one-on-one') && d.spots === 2);
 
         let withinRadius = true;
-        if (d.distance_miles != null && radius !== 'All' && radius !== 'Nationwide') {
-          const r = parseFloat(radius);
-          if (!Number.isNaN(r)) withinRadius = Number(d.distance_miles) <= r;
+        if (
+          d.distance_miles != null &&
+          radius !== 'All' &&
+          radius !== 'Nationwide'
+        ) {
+          const rmi = parseFloat(radius);
+          if (!Number.isNaN(rmi)) withinRadius = Number(d.distance_miles) <= rmi;
         }
 
         const locationMatch =
-          !filterText ||
+          !locationTerm ||
           (typeof d.location === 'string' &&
-            d.location.toLowerCase().includes(filterText.toLowerCase()));
+            d.location.toLowerCase().includes(locationTerm.toLowerCase()));
 
         if (!typeMatch || !withinRadius || !locationMatch) return false;
 
@@ -666,7 +932,7 @@ export default function DateFeedScreen() {
         return true;
       });
 
-      // 8) Sort
+      // Sort
       const sorted = [...filtered].sort((a, b) => {
         const aDate = a.event_date ? +new Date(a.event_date) : 0;
         const bDate = b.event_date ? +new Date(b.event_date) : 0;
@@ -674,19 +940,40 @@ export default function DateFeedScreen() {
         const bDist = b.distance_miles ?? Number.POSITIVE_INFINITY;
         const rank = (x: DateRow) => (isFull(x) ? 2 : isPast(x) ? 3 : 1);
 
-        if (sortBy === 'Upcoming') return rank(a) - rank(b) || aDate - bDate || aDist - bDist;
-        if (sortBy === 'Distance') return rank(a) - rank(b) || aDist - bDist || aDate - bDate;
-        if (sortBy === 'Newest') return (+new Date(b.created_at || 0)) - (+new Date(a.created_at || 0));
-        if (sortBy === 'Oldest') return (+new Date(a.created_at || 0)) - (+new Date(b.created_at || 0));
+        if (sortBy === 'Upcoming')
+          return rank(a) - rank(b) || aDate - bDate || aDist - bDist;
+        if (sortBy === 'Distance')
+          return rank(a) - rank(b) || aDist - bDist || aDate - bDate;
+        if (sortBy === 'Newest')
+          return +new Date(b.created_at || 0) - +new Date(a.created_at || 0);
+        if (sortBy === 'Oldest')
+          return +new Date(a.created_at || 0) - +new Date(b.created_at || 0);
         return 0;
       });
 
       if (__DEV__) {
-        console.debug(`[DateFeed] fetched=${base.length} afterFilters=${sorted.length}`);
+        console.debug(
+          `[DateFeed] fetched=${base.length} afterFilters=${sorted.length} viewer=${
+            viewer ? JSON.stringify(viewer) : 'none'
+          }`
+        );
       }
       return { rows: sorted, pageUsed: pageArg };
     },
-    [canQuery, userId, profile, radius, filterText, sortBy, dateStateFilter, selectedTypes, hiddenIds, getViewerGender]
+    [
+      canQuery,
+      userId,
+      profile,
+      radius,
+      filterText,
+      sortBy,
+      dateStateFilter,
+      selectedTypes,
+      hiddenIds,
+      locationName,
+      hydrateLatLng,
+      overrideCoords,
+    ]
   );
 
   const refreshList = useCallback(
@@ -696,14 +983,16 @@ export default function DateFeedScreen() {
         onEndReachedOkRef.current = false;
         setRefreshing(true);
         setRpcError(null);
-        const { rows } = await fetchPage(1);
+        const { rows } = await fetchPage(1, _coordsOverride);
         setDates(rows);
         setPage(2);
         setHasMore(rows.length === PAGE_SIZE);
         setFirstLoadDone(true);
       } catch (e: any) {
         console.error('[DateFeed] refresh error', e?.message || e);
-        setRpcError('We had trouble loading dates. Pull to refresh to try again.');
+        setRpcError(
+          'We had trouble loading dates. Pull to refresh to try again.'
+        );
       } finally {
         setLoadingInitial(false);
         setRefreshing(false);
@@ -712,15 +1001,20 @@ export default function DateFeedScreen() {
     },
     [canQuery, fetchPage]
   );
-  useEffect(() => { refreshListRef.current = refreshList; }, [refreshList]);
+  useEffect(() => {
+    refreshListRef.current = refreshList;
+  }, [refreshList]);
 
   const loadMore = useCallback(async () => {
     if (!canQuery || fetchingMore || !hasMore) return;
     try {
       setFetchingMore(true);
-      const { rows } = await fetchPage(page);
-      setDates(prev => [...prev, ...rows]);
-      if (rows.length === PAGE_SIZE) setPage(prev => prev + 1);
+      const { rows } = await fetchPage(
+        page,
+        lastCoordsRef.current || undefined
+      );
+      setDates((prev) => [...prev, ...rows]);
+      if (rows.length === PAGE_SIZE) setPage((prev) => prev + 1);
       else setHasMore(false);
     } catch (e) {
       console.error('[DateFeed] loadMore error]', e);
@@ -729,7 +1023,7 @@ export default function DateFeedScreen() {
     }
   }, [canQuery, fetchPage, page, hasMore, fetchingMore]);
 
-  // Initial load when ready
+  // Initial load
   useEffect(() => {
     if (filtersLoaded && userId && profile) {
       setHasMore(true);
@@ -738,7 +1032,7 @@ export default function DateFeedScreen() {
     }
   }, [filtersLoaded, userId, profile, refreshList]);
 
-  // Auto-refresh when screen regains focus
+  // Refresh on focus
   useFocusEffect(
     useCallback(() => {
       if (userId && profile) {
@@ -749,137 +1043,364 @@ export default function DateFeedScreen() {
     }, [userId, profile, refreshList])
   );
 
-  // ===== Not Interested handler (also clears pinned if it matches) =====
-  const onNotInterested = useCallback(async (dateId: string) => {
-    if (!userId) return;
-    setPinned((p) => (p?.id && String(p.id) === String(dateId) ? null : p));
-    setDates(prev => prev.filter(d => String(d.id) !== String(dateId)));
-    const next = new Set(hiddenIds);
-    next.add(String(dateId));
-    setHiddenIds(next);
-    saveHidden(userId, next);
-    try {
-      const { error } = await supabase.from('user_hidden_dates').upsert(
-        { user_id: userId, date_id: dateId },
-        { onConflict: 'user_id,date_id' }
-      );
-      if (error) console.warn('[NotInterested] upsert warning:', error);
-    } catch (err) {
-      console.warn('[NotInterested] upsert failed:', err);
-    }
-  }, [userId, hiddenIds, saveHidden]);
+  // Not Interested
+  const onNotInterested = useCallback(
+    async (dateId: string) => {
+      if (!userId) return;
+      setPinned((p) => (p?.id && String(p.id) === String(dateId) ? null : p));
+      setDates((prev) => prev.filter((d) => String(d.id) !== String(dateId)));
+      const next = new Set(hiddenIds);
+      next.add(String(dateId));
+      setHiddenIds(next);
+      saveHidden(userId, next);
+      try {
+        const { error } = await supabase
+          .from('user_hidden_dates')
+          .upsert({ user_id: userId, date_id: dateId }, { onConflict: 'user_id,date_id' });
+        if (error) console.warn('[NotInterested] upsert warning:', error);
+      } catch (err) {
+        console.warn('[NotInterested] upsert failed:', err);
+      }
+    },
+    [userId, hiddenIds, saveHidden]
+  );
 
-  // ===== Invite consumption → PIN & SCROLL immediately =====
+  // Invite PIN & SCROLL
   const handledInviteRef = useRef(false);
-  const ensurePinnedVisible = useCallback(async (dateId: string) => {
-    // If already in the list, lift to the top; otherwise fetch and inject
-    let row = dates.find((d) => String(d.id) === String(dateId)) || null;
-    if (!row) row = await fetchSingleDateRow(String(dateId));
-    if (!row) return;
+  const ensurePinnedVisible = useCallback(
+    async (dateId: string) => {
+      let row =
+        dates.find((d) => String(d.id) === String(dateId)) || null;
+      if (!row) row = await fetchSingleDateRow(String(dateId));
+      if (!row) return;
 
-    setPinned(row);
-    setDates((prev) => [row!, ...prev.filter((d) => String(d.id) !== String(row!.id))]);
+      setPinned(row);
+      setDates((prev) => [
+        row!,
+        ...prev.filter((d) => String(d.id) !== String(row!.id)),
+      ]);
 
-    // Scroll to top so the user sees it "pop"
-    setTimeout(() => {
-      try { flatListRef.current?.scrollToIndex({ index: 0, animated: true }); } catch {}
-    }, 120);
-  }, [dates, fetchSingleDateRow]);
+      setTimeout(() => {
+        try {
+          flatListRef.current?.scrollToIndex({ index: 0, animated: true });
+        } catch {
+          // ignore
+        }
+      }, 120);
+    },
+    [dates, fetchSingleDateRow]
+  );
 
   useEffect(() => {
     if (!userId || !profile || handledInviteRef.current) return;
     handledInviteRef.current = true;
     (async () => {
       try {
-        const res = await consumePendingInviteAfterLogin(); // creates join_request if needed
-        const dateId = res?.date_id || res?.dateId || (res as any)?.date?.id;
+        const res = await consumePendingInviteAfterLogin();
+        const dateId =
+          (res as any)?.date_id ||
+          (res as any)?.dateId ||
+          (res as any)?.date?.id;
         if (dateId) await ensurePinnedVisible(String(dateId));
-      } catch (e) {
-        // harmless if service not available or nothing pending
+      } catch {
+        // ignore
       }
     })();
   }, [userId, profile, ensurePinnedVisible]);
 
-  // ===== Places autocomplete =====
+  // ===== Places autocomplete (robust chain) =====
+  const debouncedQueryStr = typeof debouncedQuery === 'string' ? debouncedQuery : '';
   useEffect(() => {
-    const q = debouncedQuery?.trim();
-    if (!hasPlaces) { setSuggestions([]); setOpenDropdown(false); return; }
-    if (!q || q.length < 3) { setSuggestions([]); setOpenDropdown(false); return; }
+    const q = debouncedQueryStr.trim();
+    if (!hasPlaces) {
+      setSuggestions([]);
+      setOpenDropdown(false);
+      return;
+    }
+    if (!q || q.length < 3) {
+      setSuggestions([]);
+      setOpenDropdown(false);
+      return;
+    }
     let cancelled = false;
-    (async () => {
+
+    const run = async () => {
       try {
         setLoadingSuggest(true);
-        const url =
-          `${AUTOCOMPLETE_ENDPOINT}?input=${encodeURIComponent(q)}&types=(cities)&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
-        const res = await fetch(url);
-        const json = await res.json();
-        if (cancelled) return;
 
-        if (json?.status === 'OK' && Array.isArray(json?.predictions)) {
+        const components =
+          PLACES_COUNTRIES.length > 0
+            ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}`
+            : '';
+        const base = `input=${encodeURIComponent(
+          q
+        )}&language=en&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}&locationbias=ipbias${components}`;
+
+        // A) Cities only
+        let url = `${AUTOCOMPLETE_ENDPOINT}?${base}&types=(cities)`;
+        let res = await fetch(url);
+        let json = await res.json();
+        if (
+          !cancelled &&
+          json?.status === 'OK' &&
+          Array.isArray(json?.predictions) &&
+          json.predictions.length
+        ) {
           const items: Suggestion[] = json.predictions.map((p: any) => ({
             description: p.description,
             place_id: p.place_id,
           }));
           setSuggestions(items);
-          setOpenDropdown(items.length > 0);
-        } else {
+          setOpenDropdown(true);
+          return;
+        }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places A] status:', json?.status, json?.error_message);
+        }
+
+        // A2) Regions
+        url = `${AUTOCOMPLETE_ENDPOINT}?${base}&types=(regions)`;
+        res = await fetch(url);
+        json = await res.json();
+        if (
+          !cancelled &&
+          json?.status === 'OK' &&
+          Array.isArray(json?.predictions) &&
+          json.predictions.length
+        ) {
+          const filtered = json.predictions.filter(isCityPrediction);
+          const items: Suggestion[] = filtered.map((p: any) => ({
+            description: p.description,
+            place_id: p.place_id,
+          }));
+          if (items.length) {
+            setSuggestions(items);
+            setOpenDropdown(true);
+            return;
+          }
+        }
+
+        // B) General autocomplete, filter to cities
+        url = `${AUTOCOMPLETE_ENDPOINT}?${base}`;
+        res = await fetch(url);
+        json = await res.json();
+        if (
+          !cancelled &&
+          json?.status === 'OK' &&
+          Array.isArray(json?.predictions) &&
+          json.predictions.length
+        ) {
+          const filtered = json.predictions.filter(isCityPrediction);
+          const items: Suggestion[] = filtered.map((p: any) => ({
+            description: p.description,
+            place_id: p.place_id,
+          }));
+          if (items.length) {
+            setSuggestions(items);
+            setOpenDropdown(true);
+            return;
+          }
+        }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places B] status:', json?.status, json?.error_message);
+        }
+
+        // C) Find Place
+        url = `${FINDPLACE_ENDPOINT}?input=${encodeURIComponent(
+          q
+        )}&inputtype=textquery&fields=place_id,formatted_address,name,geometry&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
+        res = await fetch(url);
+        json = await res.json();
+        if (
+          !cancelled &&
+          json?.status === 'OK' &&
+          Array.isArray(json?.candidates) &&
+          json.candidates.length
+        ) {
+          const items: Suggestion[] = json.candidates.map((c: any) => ({
+            description: c.formatted_address || c.name,
+            place_id: c.place_id,
+          }));
+          setSuggestions(items);
+          setOpenDropdown(true);
+          return;
+        }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn(
+            '[Places C - FindPlace] status:',
+            json?.status,
+            json?.error_message
+          );
+        }
+
+        // D) Geocode → pseudo suggestion
+        url = `${GEOCODE_ENDPOINT}?address=${encodeURIComponent(
+          q
+        )}&key=${GOOGLE_KEY}`;
+        res = await fetch(url);
+        json = await res.json();
+        if (
+          !cancelled &&
+          json?.status === 'OK' &&
+          Array.isArray(json?.results) &&
+          json.results.length
+        ) {
+          const r = json.results[0];
+          const label = r ? r.formatted_address || r.name : undefined;
+          const loc = r?.geometry?.location;
+          if (label && loc?.lat != null && loc?.lng != null) {
+            setSuggestions([
+              { description: label, place_id: `geo:${loc.lat},${loc.lng}` },
+            ]);
+            setOpenDropdown(true);
+            return;
+          }
+        }
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn(
+            '[Places D - Geocode] status:',
+            json?.status,
+            json?.error_message
+          );
+        }
+
+        // Nothing
+        if (!cancelled) {
           setSuggestions([]);
           setOpenDropdown(false);
         }
-      } catch {
-        setSuggestions([]);
-        setOpenDropdown(false);
+      } catch (e) {
+        if (__DEV__) console.warn('[Places ERROR]', e);
+        if (!cancelled) {
+          setSuggestions([]);
+          setOpenDropdown(false);
+        }
       } finally {
         if (!cancelled) setLoadingSuggest(false);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [debouncedQuery, sessionToken, hasPlaces]);
+    };
 
-  const resolvePlaceDetails = useCallback(async (place_id: string, label: string) => {
-    if (!hasPlaces) return;
-    try {
-      const url = `${DETAILS_ENDPOINT}?place_id=${encodeURIComponent(place_id)}&fields=geometry,name&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json?.status === 'OK' && json?.result?.geometry?.location) {
-        const { lat, lng } = json.result.geometry.location;
-        setOverrideCoords({ lat, lng });
-        setLocationName(label);
-        await AsyncStorage.setItem('locationName', label);
-        await persistFilters();
-        if (userId && profile) refreshListRef.current?.({ lat, lng });
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQueryStr, sessionToken, hasPlaces]);
+
+  const resolvePlaceDetails = useCallback(
+    async (place_id: string, label: string) => {
+      if (!hasPlaces) return;
+
+      // "geo:lat,lng" pseudo ID from the geocode fallback
+      if (place_id.startsWith('geo:')) {
+        try {
+          const [latS, lngS] = place_id.slice(4).split(',');
+          const lat = parseFloat(latS),
+            lng = parseFloat(lngS);
+          if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+            const coords = { lat, lng };
+            setOverrideCoords(coords);
+            setLocationName(label);
+            setFilterText(label);
+            await AsyncStorage.multiSet([
+              ['locationName', label],
+              ['filterText', label],
+            ]);
+            await persistFilters();
+            if (userId && profile) refreshListRef.current?.(coords);
+          }
+        } catch {
+          // ignore
+        }
+        return;
       }
-    } catch {
-      // ignore
-    }
-  }, [persistFilters, profile, sessionToken, hasPlaces, userId]);
+
+      try {
+        const url = `${DETAILS_ENDPOINT}?place_id=${encodeURIComponent(
+          place_id
+        )}&fields=geometry,name&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json?.status !== 'OK') {
+          if (__DEV__)
+            console.warn(
+              '[Places Details] status:',
+              json?.status,
+              json?.error_message
+            );
+        }
+        if (json?.status === 'OK' && json?.result?.geometry?.location) {
+          const { lat, lng } = json.result.geometry.location;
+          const coords = { lat, lng };
+          setOverrideCoords(coords);
+          setLocationName(label);
+          setFilterText(label); // keep string filter in sync
+          await AsyncStorage.multiSet([
+            ['locationName', label],
+            ['filterText', label],
+          ]);
+          await persistFilters();
+          if (userId && profile) refreshListRef.current?.(coords);
+        }
+      } catch (e) {
+        if (__DEV__) console.warn('[Places Details ERROR]', e);
+      }
+    },
+    [persistFilters, profile, sessionToken, hasPlaces, userId]
+  );
 
   // ===== Robust navigation helper for the New Date footer tab =====
   const goToCreateDateTab = useCallback(() => {
     const looksLikeCreateTab = (name: string) => {
       const n = name.toLowerCase().replace(/[\s_-]/g, '');
-      return ['newdate', 'createdate', 'new', 'create', 'createdatetab', 'newdatetab'].includes(n);
+      return [
+        'newdate',
+        'createdate',
+        'new',
+        'create',
+        'createdatetab',
+        'newdatetab',
+      ].includes(n);
     };
     let nav: any = navigation;
     for (let i = 0; i < 5 && nav; i++) {
       const state = nav?.getState?.();
-      const routeNames: string[] = Array.isArray(state?.routeNames) ? state.routeNames : [];
+      const routeNames: string[] = Array.isArray(state?.routeNames)
+        ? state.routeNames
+        : [];
       const match = routeNames.find(looksLikeCreateTab);
       if (match) {
-        try { nav.navigate(match as never); return; } catch {}
-        try { nav.navigate(match as never, { screen: 'CreateDateScreen' } as never); return; } catch {}
+        try {
+          nav.navigate(match as never);
+          return;
+        } catch {}
+        try {
+          nav.navigate(
+            match as never,
+            { screen: 'CreateDateScreen' } as never
+          );
+          return;
+        } catch {}
       }
       nav = nav?.getParent?.();
     }
     const FALLBACKS = [
-      { name: 'New Date' }, { name: 'NewDate' }, { name: 'CreateDate' },
-      { name: 'Create Date' }, { name: 'NewDateTab' }, { name: 'CreateDateTab' },
+      { name: 'New Date' },
+      { name: 'NewDate' },
+      { name: 'CreateDate' },
+      { name: 'Create Date' },
+      { name: 'NewDateTab' },
+      { name: 'CreateDateTab' },
       { name: 'CreateDateScreen' },
     ];
     for (const f of FALLBACKS) {
-      try { navigation.dispatch(CommonActions.navigate({ name: f.name as any })); return; } catch {}
-      try { navigation.navigate(f.name as never); return; } catch {}
+      try {
+        navigation.dispatch(CommonActions.navigate({ name: f.name as any }));
+        return;
+      } catch {}
+      try {
+        navigation.navigate(f.name as never);
+        return;
+      } catch {}
     }
   }, [navigation]);
 
@@ -887,7 +1408,10 @@ export default function DateFeedScreen() {
   const FiltersPanel = (
     <View style={[styles.filterPanelOuter, { paddingTop: insets.top + 6 }]}>
       <TouchableOpacity
-        onPress={() => { Keyboard.dismiss(); setShowFilters((s) => !s); }}
+        onPress={() => {
+          Keyboard.dismiss();
+          setShowFilters((s) => !s);
+        }}
         activeOpacity={0.8}
         style={styles.filterToggle}
       >
@@ -902,7 +1426,11 @@ export default function DateFeedScreen() {
           <Text style={styles.label}>📍 Location</Text>
 
           {/* Use My Current Location */}
-          <TouchableOpacity style={styles.currentLocBtn} onPress={getCurrentLocation} activeOpacity={0.9}>
+          <TouchableOpacity
+            style={styles.currentLocBtn}
+            onPress={getCurrentLocation}
+            activeOpacity={0.9}
+          >
             <Text style={styles.currentLocText}>Use My Current Location</Text>
           </TouchableOpacity>
 
@@ -914,13 +1442,18 @@ export default function DateFeedScreen() {
               value={locationName}
               onChangeText={(t) => {
                 setLocationName(t);
+                setFilterText(t); // keep in sync
                 if (t.trim().length >= 3) setOpenDropdown(true);
                 if (t.trim().length === 0) {
-                  setSuggestions([]); setOpenDropdown(false); setOverrideCoords(null);
+                  setSuggestions([]);
+                  setOpenDropdown(false);
+                  setOverrideCoords(null);
                 }
               }}
               placeholderTextColor="#8A94A6"
-              onFocus={() => { if (suggestions.length > 0) setOpenDropdown(true); }}
+              onFocus={() => {
+                if (suggestions.length > 0) setOpenDropdown(true);
+              }}
               onBlur={() => setTimeout(() => setOpenDropdown(false), 100)}
               returnKeyType="done"
               autoCapitalize="words"
@@ -933,7 +1466,9 @@ export default function DateFeedScreen() {
                 {loadingSuggest ? (
                   <View style={styles.dropdownItem}>
                     <ActivityIndicator />
-                    <Text style={{ marginLeft: 8, color: '#6b7280' }}>Searching cities…</Text>
+                    <Text style={{ marginLeft: 8, color: '#6b7280' }}>
+                      Searching cities…
+                    </Text>
                   </View>
                 ) : suggestions.length === 0 ? (
                   <View style={styles.dropdownItem}>
@@ -949,14 +1484,22 @@ export default function DateFeedScreen() {
                         style={styles.dropdownItem}
                         activeOpacity={0.85}
                         onPress={() => {
-                          setOpenDropdown(false); setSuggestions([]);
-                          resolvePlaceDetails(item.place_id, item.description);
+                          setOpenDropdown(false);
+                          setSuggestions([]);
+                          resolvePlaceDetails(
+                            item.place_id,
+                            item.description
+                          );
                         }}
                       >
-                        <Text style={{ color: '#111827' }}>{item.description}</Text>
+                        <Text style={{ color: '#111827' }}>
+                          {item.description}
+                        </Text>
                       </TouchableOpacity>
                     )}
-                    ItemSeparatorComponent={() => <View style={styles.separator} />}
+                    ItemSeparatorComponent={() => (
+                      <View style={styles.separator} />
+                    )}
                   />
                 )}
               </View>
@@ -966,21 +1509,30 @@ export default function DateFeedScreen() {
           {/* Distance */}
           <Text style={[styles.label, { marginTop: 12 }]}>📏 Distance</Text>
           <View style={styles.chipRowWrap}>
-            {['10', '25', '50', '100', '150', '250', 'Nationwide', 'All'].map((item) => {
-              const active = radius === item;
-              return (
-                <TouchableOpacity
-                  key={item}
-                  onPress={async () => { setRadius(item); await persistFilters(); refreshList(); }}
-                  style={[styles.chip, active && styles.chipActive]}
-                  activeOpacity={0.85}
-                >
-                  <Text style={active ? styles.chipTextActive : styles.chipText}>
-                    {item}{/^\d+$/.test(item) ? ' mi' : ''}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+            {['10', '25', '50', '100', '150', '250', 'Nationwide', 'All'].map(
+              (item) => {
+                const active = radius === item;
+                return (
+                  <TouchableOpacity
+                    key={item}
+                    onPress={async () => {
+                      setRadius(item);
+                      await persistFilters();
+                      refreshList();
+                    }}
+                    style={[styles.chip, active && styles.chipActive]}
+                    activeOpacity={0.85}
+                  >
+                    <Text
+                      style={active ? styles.chipTextActive : styles.chipText}
+                    >
+                      {item}
+                      {/^\d+$/.test(item) ? ' mi' : ''}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              }
+            )}
           </View>
 
           {/* Status */}
@@ -991,10 +1543,18 @@ export default function DateFeedScreen() {
               return (
                 <TouchableOpacity
                   key={opt}
-                  onPress={async () => { setDateStateFilter(opt); await persistFilters(); refreshList(); }}
+                  onPress={async () => {
+                    setDateStateFilter(opt);
+                    await persistFilters();
+                    refreshList();
+                  }}
                   style={[styles.chip, active && styles.chipActive]}
                 >
-                  <Text style={active ? styles.chipTextActive : styles.chipText}>{opt}</Text>
+                  <Text
+                    style={active ? styles.chipTextActive : styles.chipText}
+                  >
+                    {opt}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1009,12 +1569,20 @@ export default function DateFeedScreen() {
                 <TouchableOpacity
                   key={opt}
                   onPress={async () => {
-                    const next = active ? selectedTypes.filter(t => t !== opt) : [...selectedTypes, opt];
-                    setSelectedTypes(next); await persistFilters(); refreshList();
+                    const next = active
+                      ? selectedTypes.filter((t) => t !== opt)
+                      : [...selectedTypes, opt];
+                    setSelectedTypes(next);
+                    await persistFilters();
+                    refreshList();
                   }}
                   style={[styles.chip, active && styles.chipActive]}
                 >
-                  <Text style={active ? styles.chipTextActive : styles.chipText}>{opt}</Text>
+                  <Text
+                    style={active ? styles.chipTextActive : styles.chipText}
+                  >
+                    {opt}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1028,10 +1596,18 @@ export default function DateFeedScreen() {
               return (
                 <TouchableOpacity
                   key={opt}
-                  onPress={async () => { setSortBy(opt); await persistFilters(); refreshList(); }}
+                  onPress={async () => {
+                    setSortBy(opt);
+                    await persistFilters();
+                    refreshList();
+                  }}
                   style={[styles.chip, active && styles.chipActive]}
                 >
-                  <Text style={active ? styles.chipTextActive : styles.chipText}>{opt}</Text>
+                  <Text
+                    style={active ? styles.chipTextActive : styles.chipText}
+                  >
+                    {opt}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1044,47 +1620,69 @@ export default function DateFeedScreen() {
   // ===== List footer =====
   const ListFooter = useMemo(() => {
     if (fetchingMore) {
-      return (<View style={{ paddingVertical: 12 }}><ActivityIndicator /></View>);
+      return (
+        <View style={{ paddingVertical: 12 }}>
+          <ActivityIndicator />
+        </View>
+      );
     }
     if (!hasMore && dates.length > 0) {
-      return (<View><Text style={{ textAlign: 'center', padding: 12, color: 'gray' }}>No more results</Text></View>);
+      return (
+        <View>
+          <Text style={{ textAlign: 'center', padding: 12, color: 'gray' }}>
+            No more results
+          </Text>
+        </View>
+      );
     }
     return null;
   }, [fetchingMore, hasMore, dates.length]);
 
-  // ===== Deep-link scroll (param) =====
+  // ===== Deep-link scroll (param or prop) =====
   const lastHandledIdRef = useRef<string | undefined>(undefined);
   const tryScrollToId = useCallback(
     (id?: string) => {
       if (!id) return;
-      const full = (pinned ? [pinned, ...dates.filter(d => d.id !== pinned.id)] : dates);
+      const full = pinned
+        ? [pinned, ...dates.filter((d) => d.id !== pinned.id)]
+        : dates;
       if (!full.length) return;
       if (lastHandledIdRef.current === id) return;
       const index = full.findIndex((d) => String(d.id) === String(id));
       if (index !== -1) {
         flatListRef.current?.scrollToIndex({ index, animated: true });
         lastHandledIdRef.current = id;
-        if (route.params?.scrollToDateId) navigation.setParams({ scrollToDateId: undefined } as any);
+        // clear wrapper param so it doesn't re-trigger
+        try {
+          navigation.setParams({ scrollToDateId: undefined } as any);
+        } catch {
+          // ignore
+        }
       }
-    }, [dates, pinned, navigation, route.params]
+    },
+    [dates, pinned, navigation]
   );
 
   useFocusEffect(
     useCallback(() => {
-      const id = route.params?.scrollToDateId;
-      if (!loadingInitial && !refreshing) tryScrollToId(id);
-    }, [route.params?.scrollToDateId, loadingInitial, refreshing, tryScrollToId])
+      const idFromProp = scrollToDateId ?? (route.params as any)?.scrollToDateId;
+      if (!loadingInitial && !refreshing) tryScrollToId(idFromProp);
+    }, [scrollToDateId, route.params, loadingInitial, refreshing, tryScrollToId])
   );
 
   // --- Render data (prepend pinned if present) ---
   const listData = useMemo(
-    () => (pinned ? [pinned, ...dates.filter((d) => d.id !== pinned.id)] : dates),
+    () =>
+      pinned ? [pinned, ...dates.filter((d) => d.id !== pinned.id)] : dates,
     [pinned, dates]
   );
 
   // --- UI ---
   return (
-    <AnimatedScreenWrapper showLogo={false} {...({ style: { backgroundColor: '#FFFFFF' } } as any)}>
+    <AnimatedScreenWrapper
+      showLogo={false}
+      {...({ style: { backgroundColor: '#FFFFFF' } } as any)}
+    >
       <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
         {FiltersPanel}
 
@@ -1100,8 +1698,15 @@ export default function DateFeedScreen() {
               isCreator={item.creator_id === userId}
               isAccepted={false}
               disabled={false}
-              onPressProfile={(pid) => navigation.navigate('PublicProfile', { userId: pid, origin: 'DateFeed' } as any)}
-              onPressCard={() => {/* hook for details */}}
+              onPressProfile={(pid) =>
+                navigation.navigate('PublicProfile' as any, {
+                  userId: pid,
+                  origin: 'DateFeed',
+                } as any)
+              }
+              onPressCard={() => {
+                /* hook for details */
+              }}
               onNotInterested={() => onNotInterested(String(item.id))}
             />
           )}
@@ -1110,95 +1715,196 @@ export default function DateFeedScreen() {
           initialNumToRender={6}
           maxToRenderPerBatch={8}
           updateCellsBatchingPeriod={60}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => refreshList()} />}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => refreshList()}
+            />
+          }
           onEndReached={() => {
             if (!onEndReachedOkRef.current) return;
-            if (!loadingInitial && !refreshing && hasMore && !fetchingMore) loadMore();
+            if (!loadingInitial && !refreshing && hasMore && !fetchingMore)
+              loadMore();
           }}
           onEndReachedThreshold={0.4}
-          onMomentumScrollBegin={() => { onEndReachedOkRef.current = true; }}
+          onMomentumScrollBegin={() => {
+            onEndReachedOkRef.current = true;
+          }}
           onScrollToIndexFailed={(info) => {
-            setTimeout(() => flatListRef.current?.scrollToIndex({ index: info.index, animated: true }), 250);
+            setTimeout(
+              () =>
+                flatListRef.current?.scrollToIndex({
+                  index: info.index,
+                  animated: true,
+                }),
+              250
+            );
           }}
           ListFooterComponent={ListFooter}
           ListEmptyComponent={
-            firstLoadDone && !loadingInitial && !refreshing
-              ? (
-                <View style={{ width: '100%', alignItems: 'center', padding: 24 }}>
-                  {!userId ? (
-                    <>
-                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                        You’re signed out. Log in to see dates.
-                      </Text>
-                      <TouchableOpacity onPress={() => navigation.navigate('Login')} style={styles.primaryBtn}>
-                        <Text style={styles.primaryBtnText}>Log In</Text>
-                      </TouchableOpacity>
-                    </>
-                  ) : rpcError ? (
-                    <>
-                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                        {rpcError}
-                      </Text>
-                      <TouchableOpacity onPress={() => refreshList()} style={styles.primaryBtn}>
-                        <Text style={styles.primaryBtnText}>Retry</Text>
-                      </TouchableOpacity>
-                    </>
-                  ) : (
-                    <>
-                      <Text style={{ fontSize: 16, fontWeight: '500', marginBottom: 10, textAlign: 'center' }}>
-                        There are no dates nearby — yet. Be a pioneer and create one!
-                        {'\n'}From one‑on‑one dinners to poker nights, concerts, or a classy yacht party —
-                        your invite could spark the next great connection.
-                      </Text>
-                      <TouchableOpacity onPress={goToCreateDateTab} style={styles.primaryBtn}>
-                        <Text style={styles.primaryBtnText}>+ Create Date</Text>
-                      </TouchableOpacity>
-                    </>
-                  )}
-                </View>
-              ) : null
+            firstLoadDone && !loadingInitial && !refreshing ? (
+              <View
+                style={{ width: '100%', alignItems: 'center', padding: 24 }}
+              >
+                {!userId ? (
+                  <>
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        fontWeight: '500',
+                        marginBottom: 10,
+                        textAlign: 'center',
+                      }}
+                    >
+                      You’re signed out. Log in to see dates.
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() => navigation.navigate('Login' as any)}
+                      style={styles.primaryBtn}
+                    >
+                      <Text style={styles.primaryBtnText}>Log In</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : rpcError ? (
+                  <>
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        fontWeight: '500',
+                        marginBottom: 10,
+                        textAlign: 'center',
+                      }}
+                    >
+                      {rpcError}
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() => refreshList()}
+                      style={styles.primaryBtn}
+                    >
+                      <Text style={styles.primaryBtnText}>Retry</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        fontWeight: '500',
+                        marginBottom: 10,
+                        textAlign: 'center',
+                      }}
+                    >
+                      There are no dates nearby — yet. Be a pioneer and create
+                      one!
+                      {'\n'}
+                      From one‑on‑one dinners to poker nights, concerts, or a
+                      classy yacht party — your invite could spark the next
+                      great connection.
+                    </Text>
+                    <TouchableOpacity
+                      onPress={goToCreateDateTab}
+                      style={styles.primaryBtn}
+                    >
+                      <Text style={styles.primaryBtnText}>+ Create Date</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            ) : null
           }
         />
       </View>
     </AnimatedScreenWrapper>
   );
-}
+};
 
+export default memo(DateFeedScreen);
+
+// ===== Styles =====
 const styles = StyleSheet.create({
   // Filter panel
   filterPanelOuter: { backgroundColor: '#FFFFFF', paddingHorizontal: 12 },
   filterToggle: { paddingVertical: 8, alignItems: 'flex-start' },
   toggle: { fontSize: 14, fontWeight: '600', color: DRYNKS_RED },
-  filterPanel: { backgroundColor: DRYNKS_GRAY, padding: 12, borderRadius: 12, marginTop: 10 },
+  filterPanel: {
+    backgroundColor: DRYNKS_GRAY,
+    padding: 12,
+    borderRadius: 12,
+    marginTop: 10,
+  },
   label: { fontSize: 12, fontWeight: '600', marginTop: 4, color: DRYNKS_BLUE },
 
   currentLocBtn: {
-    marginTop: 6, borderWidth: 1, borderColor: '#DADFE6', backgroundColor: '#fff',
-    borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, alignItems: 'center',
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: '#DADFE6',
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
   },
   currentLocText: { color: DRYNKS_BLUE, fontWeight: '700' },
 
   // Places dropdown
   input: {
-    height: 50, borderColor: '#DADFE6', borderWidth: 1, borderRadius: 10,
-    paddingHorizontal: 12, marginTop: 8, fontSize: 16, backgroundColor: '#fff', color: '#1F2A33',
+    height: 50,
+    borderColor: '#DADFE6',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    marginTop: 8,
+    fontSize: 16,
+    backgroundColor: '#fff',
+    color: '#1F2A33',
   },
   dropdown: {
-    position: 'absolute', top: 58, left: 0, right: 0, backgroundColor: '#fff',
-    borderColor: '#E5E7EB', borderWidth: 1, borderRadius: 10, overflow: 'hidden',
-    zIndex: 1000, maxHeight: 240, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 8, elevation: 3,
+    position: 'absolute',
+    top: 58,
+    left: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    borderColor: '#E5E7EB',
+    borderWidth: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
+    zIndex: 1000,
+    maxHeight: 240,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  dropdownItem: { paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center' },
+  dropdownItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#fff',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   separator: { height: 1, backgroundColor: '#F3F4F6' },
 
   // Chips
   chipRowWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 6 },
-  chip: { backgroundColor: '#ddd', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6, marginRight: 8, marginBottom: 8 },
+  chip: {
+    backgroundColor: '#ddd',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 8,
+    marginBottom: 8,
+  },
   chipActive: { backgroundColor: DRYNKS_BLUE },
   chipText: { fontSize: 12, color: '#333' },
   chipTextActive: { fontSize: 12, color: '#fff', fontWeight: '600' },
 
   // Buttons
-  primaryBtn: { backgroundColor: DRYNKS_RED, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, marginTop: 8 },
+  primaryBtn: {
+    backgroundColor: DRYNKS_RED,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 10,
+    marginTop: 8,
+  },
   primaryBtnText: { color: 'white', fontWeight: '700' },
 });

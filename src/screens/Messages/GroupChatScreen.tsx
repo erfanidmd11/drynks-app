@@ -14,11 +14,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useRoute, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { Video } from 'expo-av';
+import { Video, ResizeMode } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import Animated, { FadeInUp } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import AppShell from '@components/AppShell';
 import { supabase } from '@config/supabase';
@@ -40,8 +41,8 @@ type Profile = { id: UUID; screenname: string | null; profile_photo: string | nu
 
 type ChatMessage = {
   id: UUID;
-  room_id?: UUID | null;            // ← supports room-based chats (group)
-  date_id: UUID | null;             // ← kept for backward compatibility
+  room_id?: UUID | null; // supports room-based chats (group)
+  date_id: UUID | null;  // kept for backward compatibility
   sender_id: UUID | null;
   content: string | null;
   created_at: string;
@@ -62,9 +63,7 @@ function getYMDInTZ(date: Date, tz?: string | null) {
     day: '2-digit',
   });
   const parts = fmt.formatToParts(date);
-  let y = 0,
-    m = 0,
-    d = 0;
+  let y = 0, m = 0, d = 0;
   for (const p of parts) {
     if (p.type === 'year') y = +p.value;
     if (p.type === 'month') m = +p.value;
@@ -90,7 +89,7 @@ function isChatLocked(eventISO?: string | null, tz?: string | null) {
 
 /* ------------------------------- main screen ------------------------------ */
 const GroupChatScreen: React.FC = () => {
-  const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
   const route = useRoute<any>();
   const { dateId } = (route.params || {}) as RouteParams;
 
@@ -225,7 +224,7 @@ const GroupChatScreen: React.FC = () => {
           markSeen();
         }
       )
-      .subscribe(() => {});
+      .subscribe();
   }, [dateId, roomId, scrollToEnd, markSeen]);
 
   useEffect(() => {
@@ -262,32 +261,90 @@ const GroupChatScreen: React.FC = () => {
     } catch {}
   };
 
+  // Request media library permission (iOS handles Limited access)
+  const ensureMediaPermission = async (): Promise<boolean> => {
+    try {
+      let perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+
+      if (!perm.granted) {
+        perm = await ImagePicker.requestMediaLibraryPermissionsAsync(); // no options per Expo 54
+      }
+
+      // Treat "limited" as acceptable since the system picker enforces scope
+      const grantedOrLimited =
+        perm.granted || (perm as any).accessPrivileges === 'limited';
+
+      if (!grantedOrLimited && perm.canAskAgain) {
+        perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      }
+
+      if (!(perm.granted || (perm as any).accessPrivileges === 'limited')) {
+        Alert.alert('Permission needed', 'Allow photo access to send images and videos.');
+        return false;
+      }
+      return true;
+    } catch {
+      // Fall back; the system picker can still prompt if needed
+      return true;
+    }
+  };
+
   const uploadMedia = async (): Promise<{ media_url: string; type: 'image' | 'video' } | null> => {
     setPickerBusy(true);
     try {
+      const ok = await ensureMediaPermission();
+      if (!ok) return null;
+
       const res = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
         allowsEditing: false,
         quality: 0.85,
-        videoMaxDuration: MAX_VIDEO_SEC,
+        allowsMultipleSelection: false,
       });
       if (res.canceled || !res.assets?.length) return null;
 
       const asset = res.assets[0];
-      const isVideo = asset.type?.startsWith('video');
-      const fileUri = asset.uri;
-      const fileExt = isVideo ? 'mp4' : 'jpg';
-      const prefix = (roomId ?? dateId) as UUID;
-      const path = `${prefix}/${me}/${Date.now()}.${fileExt}`;
+      const isVideo = (asset.type || asset.mimeType || '').startsWith('video');
 
-      const file = await fetch(fileUri).then(r => r.blob());
+      // Enforce video duration if provided by the picker (seconds)
+      if (isVideo && typeof asset.duration === 'number' && asset.duration > MAX_VIDEO_SEC) {
+        Alert.alert('Video too long', `Please choose a video up to ${MAX_VIDEO_SEC} seconds.`);
+        return null;
+      }
+
+      const fileUri = asset.uri;
+      const fileExt =
+        isVideo && (asset.fileName?.split('.').pop() || '').toLowerCase() === 'mov'
+          ? 'mov'
+          : isVideo
+          ? 'mp4'
+          : 'jpg';
+
+      const prefix = (roomId ?? dateId) as UUID;
+      const safeUser = me || 'unknown';
+      const path = `${prefix}/${safeUser}/${Date.now()}.${fileExt}`;
+
+      const blob = await fetch(fileUri).then(r => r.blob());
+
       const { data, error } = await supabase.storage
         .from(BUCKET)
-        .upload(path, file, {
+        .upload(path, blob, {
           upsert: false,
-          contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+          contentType: (blob as any).type || (isVideo ? 'video/mp4' : 'image/jpeg'),
         });
-      if (error) throw error;
+
+      if (error) {
+        // Common cause: bucket doesn't exist or policy denies uploads
+        if (`${error.message}`.toLowerCase().includes('not found')) {
+          Alert.alert(
+            'Storage bucket missing',
+            `Bucket "${BUCKET}" was not found.\n\nCreate it in Supabase Storage (public or signed URLs) or change BUCKET in GroupChatScreen.tsx.`
+          );
+        } else {
+          Alert.alert('Upload failed', error.message);
+        }
+        return null;
+      }
 
       const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(data.path);
       return { media_url: pub.publicUrl, type: isVideo ? 'video' : 'image' };
@@ -307,8 +364,8 @@ const GroupChatScreen: React.FC = () => {
       const { data, error } = await supabase
         .from('chat_messages')
         .insert({
-          room_id: roomId ?? null,          // new rooms flow
-          date_id: roomId ? null : dateId,  // legacy flow
+          room_id: roomId ?? null, // new rooms flow
+          date_id: roomId ? null : dateId, // legacy flow
           sender_id: me,
           content: body,
           reply_to: replyTo?.id ?? null,
@@ -389,10 +446,14 @@ const GroupChatScreen: React.FC = () => {
 
   /* --------------------------------- render -------------------------------- */
 
+  // --- Dynamic paddings so the composer sits above the iPhone home indicator
+  const composerBottomPad = Math.max(insets.bottom, 10); // lift above home indicator
+  const listBottomPad = composerBottomPad + 64; // ensure last message isn't hidden
+
   const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
     const mine = me && item.sender_id === me;
     const prev = messages[index - 1];
-    const sameAsPrev = prev && prev.sender_id === item.sender_id;
+    const sameAsPrev = !!(prev && prev.sender_id === item.sender_id);
 
     const senderProfile = item.sender_id ? people.get(item.sender_id) : null;
     const name = senderProfile?.screenname || 'User';
@@ -431,7 +492,12 @@ const GroupChatScreen: React.FC = () => {
 
           {item.media_url ? (
             item.type === 'media' && item.content === '[video]' ? (
-              <Video source={{ uri: item.media_url }} style={styles.media} useNativeControls resizeMode="cover" />
+              <Video
+                source={{ uri: item.media_url }}
+                style={styles.media}
+                useNativeControls
+                resizeMode={ResizeMode.COVER}
+              />
             ) : (
               <Image source={{ uri: item.media_url }} style={styles.media} />
             )
@@ -454,29 +520,37 @@ const GroupChatScreen: React.FC = () => {
     );
   };
 
-  const headerRight = (
-    <TouchableOpacity onPress={() => setManageOpen(true)} disabled={!isHost} style={{ opacity: isHost ? 1 : 0.35 }}>
-      <Ionicons name="people-outline" size={22} color="#111" />
-    </TouchableOpacity>
-  );
-
   return (
-    <AppShell headerTitle={date?.title || 'Chat'} showBack rightAccessory={headerRight} currentTab={undefined}>
-      {/* participants row */}
-      <View style={styles.participants}>
-        {participantIds.slice(0, 8).map(id => {
-          const p = people.get(id);
-          return (
-            <View key={id} style={styles.participant}>
-              <Avatar url={p?.profile_photo || undefined} size={32} />
+    <AppShell headerTitle={date?.title || 'Chat'} showBack>
+      {/* participants bar with host manage button */}
+      <View style={styles.participantsBar}>
+        <View style={styles.participants}>
+          {participantIds.slice(0, 8).map(id => {
+            const p = people.get(id);
+            return (
+              <View key={id} style={styles.participant}>
+                <Avatar url={p?.profile_photo || undefined} size={32} />
+              </View>
+            );
+          })}
+          {participantIds.length > 8 ? (
+            <View style={[styles.participant, styles.moreCount]}>
+              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 12 }}>+{participantIds.length - 8}</Text>
             </View>
-          );
-        })}
-        {participantIds.length > 8 ? (
-          <View style={[styles.participant, styles.moreCount]}>
-            <Text style={{ color: '#fff', fontWeight: '800', fontSize: 12 }}>+{participantIds.length - 8}</Text>
-          </View>
-        ) : null}
+          ) : null}
+        </View>
+        {isHost ? (
+          <TouchableOpacity
+            onPress={() => setManageOpen(true)}
+            accessibilityRole="button"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.manageBtn}
+          >
+            <Ionicons name="people-outline" size={20} color="#333" />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 20 }} />
+        )}
       </View>
 
       {/* messages */}
@@ -500,7 +574,7 @@ const GroupChatScreen: React.FC = () => {
           data={messages}
           renderItem={renderMessage}
           keyExtractor={m => m.id}
-          contentContainerStyle={{ padding: 12, paddingBottom: 10 }}
+          contentContainerStyle={{ padding: 12, paddingBottom: listBottomPad }}
           onContentSizeChange={scrollToEnd}
           onScrollEndDrag={markSeen}
         />
@@ -509,7 +583,8 @@ const GroupChatScreen: React.FC = () => {
       {/* composer */}
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
-        keyboardVerticalOffset={Platform.select({ ios: 84, android: 0 })}
+        // Keep this modest; bottom safe-area padding handles the "too low" issue
+        keyboardVerticalOffset={Platform.select({ ios: 64, android: 0 })}
       >
         {replyTo ? (
           <View style={styles.replyBar}>
@@ -525,9 +600,13 @@ const GroupChatScreen: React.FC = () => {
           </View>
         ) : null}
 
-        <View style={[styles.inputRow, locked && { opacity: 0.5 }]}>
+        <View style={[styles.inputRow, locked && { opacity: 0.5 }, { paddingBottom: composerBottomPad }]}>
           <TouchableOpacity onPress={sendAttachment} disabled={locked || pickerBusy} style={styles.attachBtn}>
-            <Ionicons name="image-outline" size={22} color="#444" />
+            {pickerBusy ? (
+              <ActivityIndicator size="small" color="#444" />
+            ) : (
+              <Ionicons name="image-outline" size={22} color="#444" />
+            )}
           </TouchableOpacity>
           <TextInput
             style={styles.input}
@@ -578,7 +657,16 @@ const GroupChatScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  participants: { flexDirection: 'row', padding: 10, paddingTop: 4, gap: 6, alignItems: 'center' },
+  participantsBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 10,
+    paddingTop: 4,
+  },
+  manageBtn: { padding: 6 },
+
+  participants: { flexDirection: 'row', gap: 6, alignItems: 'center' },
   participant: { width: 32, height: 32, borderRadius: 16, overflow: 'hidden', borderColor: '#fff', borderWidth: 1 },
   participantAvatar: { width: '100%', height: '100%' },
   moreCount: { backgroundColor: '#999', alignItems: 'center', justifyContent: 'center' },
@@ -610,7 +698,10 @@ const styles = StyleSheet.create({
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    padding: 10,
+    paddingTop: 10,
+    paddingLeft: 10,
+    paddingRight: 10,
+    // bottom padding is added dynamically using safe-area insets
     gap: 8,
     backgroundColor: '#F7F8FA',
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -644,7 +735,13 @@ const styles = StyleSheet.create({
   replyLabel: { fontWeight: '800', color: '#9a6b00', fontSize: 12 },
   replyPreview: { color: '#6d5d00', fontSize: 12 },
 
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
   modalCard: { width: '100%', maxWidth: 420, backgroundColor: '#fff', borderRadius: 14, padding: 14 },
   modalTitle: { fontSize: 16, fontWeight: '800', color: '#111', marginBottom: 10 },
   rowUser: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },

@@ -2,16 +2,13 @@
 // Production ready; prefers server current_step, correct step order, deep links, safe onboarding resume
 // Adds silent session restore + auth-change listener for refresh-token rotation.
 
-import React, { useEffect, useState, useCallback, memo } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   NavigationContainer,
   DefaultTheme,
   type LinkingOptions,
 } from '@react-navigation/native';
-import {
-  createNativeStackNavigator,
-  type NativeStackScreenProps,
-} from '@react-navigation/native-stack';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { View, ActivityIndicator } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '@config/supabase';
@@ -61,11 +58,16 @@ import SettingsScreen from '../screens/Profile/SettingsScreen';
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 const linking: LinkingOptions<RootStackParamList> = {
-  prefixes: ['dr-ynks://', 'https://dr-ynks.app.link', 'https://dr-ynks.page.link'],
+  prefixes: [
+    'dr-ynks://',
+    'https://dr-ynks.app.link',
+    'https://dr-ynks-alternate.app.link', // Branch alt domain
+    'https://dr-ynks.page.link',          // Firebase DL (if still used)
+  ],
   config: {
     screens: {
       // Deep links
-      GroupChat: 'chat/:dateId',                 // <— open a chat by date id
+      GroupChat: 'chat/:dateId',
       DateFeed: 'invite/:scrollToDateId',
 
       // Invites / requests
@@ -79,19 +81,6 @@ const linking: LinkingOptions<RootStackParamList> = {
     },
   },
 };
-
-// Wrapper to pass deep-link param via prop (no render function children)
-type DateFeedWrapperProps = NativeStackScreenProps<RootStackParamList, 'DateFeed'>;
-const DateFeedWrapper = memo(({ route, navigation }: DateFeedWrapperProps) => {
-  const scrollToDateId = route?.params?.scrollToDateId;
-  return (
-    <DateFeedScreen
-      route={route}
-      navigation={navigation}
-      scrollToDateId={scrollToDateId}
-    />
-  );
-});
 
 const ALLOWED_INITIAL_ROUTES = new Set<keyof RootStackParamList>([
   'Splash',
@@ -137,7 +126,14 @@ const AppNavigator: React.FC = () => {
     const prefs = profile?.preferences;
     if (!Array.isArray(prefs) || prefs.length === 0) return 'ProfileSetupStepSix';
     if (!profile?.orientation) return 'ProfileSetupStepSeven';
-    if (!(profile?.social_handle || profile?.instagram_handle || profile?.tiktok_handle || profile?.facebook_handle))
+    if (
+      !(
+        profile?.social_handle ||
+        profile?.instagram_handle ||
+        profile?.tiktok_handle ||
+        profile?.facebook_handle
+      )
+    )
       return 'ProfileSetupStepEight';
     if (!profile?.location) return 'ProfileSetupStepNine';
     const gallery = profile?.gallery_photos;
@@ -212,7 +208,14 @@ const AppNavigator: React.FC = () => {
 
   if (loading) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: '#000',
+        }}
+      >
         <ActivityIndicator size="large" color="#ff5a5f" />
       </View>
     );
@@ -253,8 +256,8 @@ const AppNavigator: React.FC = () => {
         <Stack.Screen name="InviteNearby" component={InviteNearbyScreen} />
         <Stack.Screen name="MyDates" component={MyDatesScreen} />
 
-        {/* Date Feed (deep-link friendly via wrapper) */}
-        <Stack.Screen name="DateFeed" component={DateFeedWrapper} />
+        {/* ---------- Date Feed (no wrapper; DateFeedScreen reads params via useRoute) ---------- */}
+        <Stack.Screen name="DateFeed" component={DateFeedScreen} />
 
         {/* ---------- Messaging / Profiles ---------- */}
         <Stack.Screen name="GroupChat" component={GroupChatScreen} />
@@ -276,7 +279,6 @@ const AppNavigator: React.FC = () => {
         <Stack.Screen
           name="Settings"
           component={SettingsScreen}
-          // keep as-is; flip to false if Settings also renders AppShell internally
           options={{ headerShown: true, title: 'Settings' }}
         />
       </Stack.Navigator>

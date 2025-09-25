@@ -5,6 +5,9 @@
 // Header: center logo now uses DrYnks_Y_logo.png instead of letter "Y".
 // FIXES: (1) Location input is single-line; current-location button is on its own line.
 //        (2) KeyboardAvoidingView so keyboard never covers the input or the dropdown.
+//        (3) Image resizeMode uses valid strings (no ResizeMode enum for <Image>).
+//        (4) Supabase Storage upload body uses ArrayBuffer (SDK 54/supabase-js 2 friendly).
+//        (5) ImagePicker permission flow treats iOS "limited" access as acceptable.
 
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -91,12 +94,22 @@ function ageFromBirthdate(birthdate?: string | null) {
 }
 
 async function ensureMediaLibraryPermission(): Promise<boolean> {
-  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (status !== 'granted') {
-    Alert.alert('Permission required', 'We need access to your photos to continue.');
-    return false;
+  try {
+    let perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      perm = await ImagePicker.requestMediaLibraryPermissionsAsync(); // no options in SDK 54
+    }
+    // Accept iOS "limited" access as sufficient for picker
+    const ok = perm.granted || (perm as any).accessPrivileges === 'limited';
+    if (!ok) {
+      Alert.alert('Permission required', 'We need access to your photos to continue.');
+      return false;
+    }
+    return true;
+  } catch {
+    // Let the system picker prompt if possible
+    return true;
   }
-  return true;
 }
 
 async function uploadImageToStorage(localUri: string, userId: string): Promise<string> {
@@ -107,10 +120,7 @@ async function uploadImageToStorage(localUri: string, userId: string): Promise<s
     { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
   );
 
-  const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-
+  const base64 = await FileSystem.readAsStringAsync(manipulated.uri, { encoding: 'base64' }); // SDK 54 style
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -118,7 +128,7 @@ async function uploadImageToStorage(localUri: string, userId: string): Promise<s
   const filePath = `${userId}/${uuidv4()}.jpg`;
   const { data, error } = await supabase.storage
     .from(PROFILE_BUCKET)
-    .upload(filePath, bytes, {
+    .upload(filePath, bytes.buffer, {
       contentType: 'image/jpeg',
       upsert: true,
       cacheControl: '31536000',

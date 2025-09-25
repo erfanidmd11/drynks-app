@@ -41,7 +41,7 @@ export async function uploadImageToDateBucket(
 
   // 2) Read as base64 and convert to bytes
   const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
-    encoding: FileSystem.EncodingType.Base64,
+    encoding: 'base64',
   });
   const bytes = base64ToBytes(base64);
   if (!bytes.length) throw new Error('Image read resulted in 0 bytes.');
