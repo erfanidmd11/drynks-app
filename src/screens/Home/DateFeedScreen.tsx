@@ -1,14 +1,11 @@
-// src/screens/Home/DateFeedScreen.tsx
 // Date Feed — production-ready, tolerant to both vw_feed_dates_v2 and vw_feed_dates
 // FIXES:
-//  - Provide creator screenname/birthdate/preferences so DateCard can show Host name + age
-//  - Provide accepted_profiles with same fields so "Guest" slide shows name + age
-//  - Populate who_pays from date_requests so DateCard doesn't show "💸 Unknown"
-//  - Invite link pinning: claimed invite is fetched and pinned + scroll to it.
-//  - ✅ Uses selected location (or current/profile) to compute distance_miles and filter by radius.
-//  - ✅ Location text filter uses the same state (locationName) and stays persisted.
-//  - ✅ Robust Places autocomplete with fallbacks; reads Google key via @config/env (manifest-safe).
-//  - ✅ Hydrates lat/lng from date_requests when views don’t include them.
+//  - Fall back to base table (date_requests) if views are missing.
+//  - Do NOT apply the "location text includes" filter when we have coordinates + radius.
+//  - Exclude my own posts (creator != me) at the query level for all sources.
+//  - If viewer is Female, require female slots > 0 (configurable below).
+//  - Keep creator/accepted profile hydration + who_pays & lat/lng hydration.
+//  - Invite-link pinning + robust places autocomplete remain intact.
 
 import React, {
   useState,
@@ -36,9 +33,7 @@ import {
   CommonActions,
   type RouteProp,
 } from '@react-navigation/native';
-import {
-  type NativeStackScreenProps,
-} from '@react-navigation/native-stack';
+import { type NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { v4 as uuidv4 } from 'uuid';
@@ -112,6 +107,9 @@ type DateRow = {
 
 const PAGE_SIZE = 10;
 
+// Optional behavior: if the viewer is Female, require female slots > 0
+const REQUIRE_FEMALE_SLOT_WHEN_VIEWER_IS_FEMALE = true;
+
 // --- Google Places
 type Suggestion = { description: string; place_id: string };
 const AUTOCOMPLETE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
@@ -121,7 +119,6 @@ const GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json';
 
 // ===== Types for screen props (matches AppNavigator's wrapper) =====
 type ScreenProps = NativeStackScreenProps<RootStackParamList, 'DateFeed'> & {
-  /** Optional override passed by the wrapper; mirrors route?.params?.scrollToDateId */
   scrollToDateId?: string;
 };
 
@@ -172,9 +169,7 @@ function milesBetween(
   return R * c;
 }
 
-function parseWktPoint(
-  s?: string | null
-): { lat: number; lng: number } | null {
+function parseWktPoint(s?: string | null): { lat: number; lng: number } | null {
   if (!s || !/^SRID=/i.test(s)) return null;
   const m = /POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i.exec(s);
   if (!m) return null;
@@ -184,7 +179,6 @@ function parseWktPoint(
   return { lat, lng: lon };
 }
 
-// Keep only “city-like” predictions when we must use general autocomplete
 function isCityPrediction(p: any): boolean {
   const t: string[] = Array.isArray(p?.types) ? p.types : [];
   if (t.includes('locality')) return true;
@@ -211,7 +205,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
 
-  // 🔴 pinned (invite) —
+  // pinned (invite)
   const [pinned, setPinned] = useState<DateRow | null>(null);
 
   // --- flags ---
@@ -236,10 +230,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     'one-on-one',
   ]);
   const [locationName, setLocationName] = useState('');
-  const [overrideCoords, setOverrideCoords] = useState<{
-    lat: number;
-    lng: number;
-  } | null>(null);
+  const [overrideCoords, setOverrideCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   // Suggestions state
   const [sessionToken] = useState<string>(uuidv4());
@@ -250,7 +241,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
   const hasPlaces = HAS_PLACES;
   const didInitLocationRef = useRef(false);
 
-  // The coordinates we used on the last fetch (for pagination consistency)
+  // Keep the coordinates used for pagination consistent
   const lastCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
 
   // --- per-user hidden IDs ---
@@ -499,9 +490,9 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           .from('vw_feed_dates_v2')
           .select(
             `
-          id, creator, event_type, event_date, location, created_at,
+          id, title, creator, event_type, event_date, location, created_at,
           accepted_users, orientation_preference, spots, remaining_gender_counts,
-          photo_urls, profile_photo, date_cover, creator_photo
+          photo_urls, profile_photo, date_cover, creator_photo, latitude, longitude
         `
           )
           .eq('id', dateId)
@@ -516,9 +507,9 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
             .from('vw_feed_dates')
             .select(
               `
-            id, creator, event_type, event_date, location, created_at,
+            id, title, creator, event_type, event_date, location, created_at,
             accepted_users, orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo
+            photo_urls, profile_photo, latitude, longitude
           `
             )
             .eq('id', dateId)
@@ -534,7 +525,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
             .from('date_requests')
             .select(
               `
-            id, creator, event_type, event_date, location, created_at,
+            id, title, creator, event_type, event_date, location, created_at,
             latitude, longitude,
             orientation_preference, spots, remaining_gender_counts,
             photo_urls, profile_photo
@@ -606,7 +597,6 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         // ignore
       }
 
-      // lat/lng fallback chain
       let lat: number | null =
         typeof base.latitude === 'number' ? base.latitude : null;
       let lng: number | null =
@@ -700,12 +690,12 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
 
   /**
    * Fetch a page; compute distance using coordsOverride or last known/viewer coords.
+   * Fallback chain: vw_feed_dates_v2 -> vw_feed_dates -> date_requests
    */
   const fetchPage = useCallback(
     async (pageArg: number, coordsOverride?: { lat: number; lng: number }) => {
       if (!canQuery) return { rows: [] as DateRow[], pageUsed: pageArg };
 
-      // decide coords for this fetch and remember for pagination
       const viewer =
         coordsOverride ??
         lastCoordsRef.current ??
@@ -720,17 +710,16 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
       const rangeTo = rangeFrom + PAGE_SIZE - 1;
       const nowIso = new Date().toISOString();
 
-      // Try v2 first; if error (e.g., view missing), fall back to v1
       let base: any[] = [];
+      // Try v2
       try {
         const { data, error } = await supabase
           .from('vw_feed_dates_v2')
           .select(
             `
-            id, creator, event_type, event_date, location, created_at,
+            id, title, creator, event_type, event_date, location, created_at,
             accepted_users, orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo,
-            date_cover, creator_photo
+            photo_urls, profile_photo, date_cover, creator_photo, latitude, longitude
           `
           )
           .gte('event_date', nowIso)
@@ -740,21 +729,42 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         if (error) throw error;
         base = data ?? [];
       } catch {
-        const { data, error } = await supabase
-          .from('vw_feed_dates')
-          .select(
+        // Try v1
+        try {
+          const { data, error } = await supabase
+            .from('vw_feed_dates')
+            .select(
+              `
+              id, title, creator, event_type, event_date, location, created_at,
+              accepted_users, orientation_preference, spots, remaining_gender_counts,
+              photo_urls, profile_photo, latitude, longitude
             `
-            id, creator, event_type, event_date, location, created_at,
-            accepted_users, orientation_preference, spots, remaining_gender_counts,
-            photo_urls, profile_photo
-          `
-          )
-          .gte('event_date', nowIso)
-          .neq('creator', userId!)
-          .order('event_date', { ascending: true })
-          .range(rangeFrom, rangeTo);
-        if (error) throw error;
-        base = data ?? [];
+            )
+            .gte('event_date', nowIso)
+            .neq('creator', userId!)
+            .order('event_date', { ascending: true })
+            .range(rangeFrom, rangeTo);
+          if (error) throw error;
+          base = data ?? [];
+        } catch {
+          // Fallback to base table
+          const { data, error } = await supabase
+            .from('date_requests')
+            .select(
+              `
+              id, title, creator, event_type, event_date, location, created_at,
+              accepted_users, orientation_preference, spots, remaining_gender_counts,
+              photo_urls, profile_photo, latitude, longitude, status
+            `
+            )
+            .eq('status', 'pending')
+            .gte('event_date', nowIso)
+            .neq('creator', userId!)
+            .order('event_date', { ascending: true })
+            .range(rangeFrom, rangeTo);
+          if (error) throw error;
+          base = data ?? [];
+        }
       }
 
       if (!base.length) {
@@ -843,6 +853,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           : creator_profile?.location ?? null;
 
         const cover: string | null =
+          r.date_cover ||
           (Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
           r.profile_photo ||
           creator_profile?.profile_photo ||
@@ -895,12 +906,35 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
       });
 
       // Client filters
+      const viewerCoords =
+        lastCoordsRef.current ||
+        overrideCoords ||
+        (profile?.latitude != null && profile?.longitude != null
+          ? { lat: profile.latitude!, lng: profile.longitude! }
+          : null);
+
+      const mustUseTextFilter =
+        !viewerCoords || radius === 'Nationwide' || radius === 'All';
+
       const locationTerm = (locationName || filterText || '').trim();
+
+      const requireFemaleSlot =
+        REQUIRE_FEMALE_SLOT_WHEN_VIEWER_IS_FEMALE &&
+        (profile?.gender || '').toLowerCase() === 'female';
+
       const filtered = mapped.filter((d) => {
         if (hiddenIds.has(String(d.id))) return false;
 
         const past = isPast(d);
         const full = isFull(d);
+
+        // Optionally require a female slot if viewer is female
+        if (requireFemaleSlot) {
+          const femaleLeft = Number(
+            (d.remaining_gender_counts as any)?.Female ?? 0
+          );
+          if (Number.isFinite(femaleLeft) && femaleLeft <= 0) return false;
+        }
 
         const typeMatch =
           d.spots == null
@@ -918,12 +952,24 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           if (!Number.isNaN(rmi)) withinRadius = Number(d.distance_miles) <= rmi;
         }
 
+        // Only apply string "location contains" when we lack coords OR user chose Nationwide/All
         const locationMatch =
+          !mustUseTextFilter ||
           !locationTerm ||
           (typeof d.location === 'string' &&
             d.location.toLowerCase().includes(locationTerm.toLowerCase()));
 
-        if (!typeMatch || !withinRadius || !locationMatch) return false;
+        // basic orientation sanity (if present)
+        const orient = Array.isArray(d.orientation_preference)
+          ? d.orientation_preference
+          : [];
+        const orientationOK =
+          orient.length === 0 ||
+          orient.includes('Everyone') ||
+          orient.includes('Straight');
+
+        if (!typeMatch || !withinRadius || !locationMatch || !orientationOK)
+          return false;
 
         if (dateStateFilter === 'Available Dates' && full) return false;
         if (dateStateFilter === 'Filled Dates' && !full) return false;
@@ -1109,7 +1155,8 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
   }, [userId, profile, ensurePinnedVisible]);
 
   // ===== Places autocomplete (robust chain) =====
-  const debouncedQueryStr = typeof debouncedQuery === 'string' ? debouncedQuery : '';
+  const debouncedQueryStr =
+    typeof debouncedQuery === 'string' ? debouncedQuery : '';
   useEffect(() => {
     const q = debouncedQueryStr.trim();
     if (!hasPlaces) {
@@ -1153,9 +1200,6 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           setSuggestions(items);
           setOpenDropdown(true);
           return;
-        }
-        if (__DEV__ && json?.status !== 'OK') {
-          console.warn('[Places A] status:', json?.status, json?.error_message);
         }
 
         // A2) Regions
@@ -1201,9 +1245,6 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
             return;
           }
         }
-        if (__DEV__ && json?.status !== 'OK') {
-          console.warn('[Places B] status:', json?.status, json?.error_message);
-        }
 
         // C) Find Place
         url = `${FINDPLACE_ENDPOINT}?input=${encodeURIComponent(
@@ -1224,13 +1265,6 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           setSuggestions(items);
           setOpenDropdown(true);
           return;
-        }
-        if (__DEV__ && json?.status !== 'OK') {
-          console.warn(
-            '[Places C - FindPlace] status:',
-            json?.status,
-            json?.error_message
-          );
         }
 
         // D) Geocode → pseudo suggestion
@@ -1256,15 +1290,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
             return;
           }
         }
-        if (__DEV__ && json?.status !== 'OK') {
-          console.warn(
-            '[Places D - Geocode] status:',
-            json?.status,
-            json?.error_message
-          );
-        }
 
-        // Nothing
         if (!cancelled) {
           setSuggestions([]);
           setOpenDropdown(false);
@@ -1290,7 +1316,6 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     async (place_id: string, label: string) => {
       if (!hasPlaces) return;
 
-      // "geo:lat,lng" pseudo ID from the geocode fallback
       if (place_id.startsWith('geo:')) {
         try {
           const [latS, lngS] = place_id.slice(4).split(',');
@@ -1320,20 +1345,12 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         )}&fields=geometry,name&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
         const res = await fetch(url);
         const json = await res.json();
-        if (json?.status !== 'OK') {
-          if (__DEV__)
-            console.warn(
-              '[Places Details] status:',
-              json?.status,
-              json?.error_message
-            );
-        }
         if (json?.status === 'OK' && json?.result?.geometry?.location) {
           const { lat, lng } = json.result.geometry.location;
           const coords = { lat, lng };
           setOverrideCoords(coords);
           setLocationName(label);
-          setFilterText(label); // keep string filter in sync
+          setFilterText(label);
           await AsyncStorage.multiSet([
             ['locationName', label],
             ['filterText', label],

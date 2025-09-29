@@ -51,7 +51,7 @@ module.exports = function (api) {
   }
 
   // ⚠️ MUST be last for Reanimated v3+
-  plugins.push('react-native-reanimated/plugin');
+  plugins.push('react-native-worklets/plugin');
 
   return {
     presets: ['babel-preset-expo'],

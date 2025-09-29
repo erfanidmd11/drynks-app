@@ -1,5 +1,13 @@
-// src/boot/SafeEmitterShim.ts
-// Harden NativeEventEmitter for iOS 18: ignore non-emitters + block early adds until UI is ready.
+/**
+ * SafeEmitterShim (RN 0.81+ / iOS 18) — production ready
+ *
+ * - Never assign to React Native's `NativeEventEmitter` export (getter-only on iOS 18).
+ * - Patch the class prototype to harden `addListener`.
+ * - Provide an optional legacy alias for `RCTDeviceEventEmitter`.
+ *
+ * Import very early (after Reanimated) in index.js:
+ *   import './src/boot/SafeEmitterShim';
+ */
 
 import * as RN from 'react-native';
 import { Platform } from 'react-native';
@@ -15,9 +23,22 @@ export function unlockEmitters() {
   try { console.log('[SafeEmitterShim] emitters UNLOCKED'); } catch {}
 }
 
-const OriginalNEE = (RN as any).NativeEventEmitter as any;
+const resolveNEEClass = (): any => {
+  const fromRN = (RN as any).NativeEventEmitter; // read-only getter on iOS 18
+  if (fromRN) return fromRN;
+  try {
+    // Fallback for unusual packagers; safe to require
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('react-native/Libraries/EventEmitter/NativeEventEmitter');
+    return mod?.default ?? mod;
+  } catch {
+    return null;
+  }
+};
 
-function getModuleName(nativeModule: any) {
+const NativeEventEmitterClass: any = resolveNEEClass();
+
+function getName(nativeModule: any) {
   try {
     return (
       nativeModule?.name ??
@@ -31,38 +52,44 @@ function getModuleName(nativeModule: any) {
   }
 }
 
-class SafeNativeEventEmitter extends OriginalNEE {
-  private __nativeModule: any;
+function isRealEmitter(nativeModule: any) {
+  return (
+    !!nativeModule &&
+    typeof nativeModule.addListener === 'function' &&
+    typeof nativeModule.removeListeners === 'function'
+  );
+}
 
-  constructor(nativeModule?: any) {
-    const hasAdd = typeof nativeModule?.addListener === 'function';
-    const hasRemove = typeof nativeModule?.removeListeners === 'function';
-    const isEmitter = !!nativeModule && hasAdd && hasRemove; // <-- AND, not OR
+// --------- Harden addListener without touching RN export itself ----------
+(() => {
+  const proto = NativeEventEmitterClass?.prototype;
+  if (!proto) return;
 
-    // Only pass a module to the base class if it’s a *real* emitter
-    super(isEmitter ? nativeModule : undefined);
-    this.__nativeModule = isEmitter ? nativeModule : null;
+  if ((proto as any).__dr_shimmed_addListener) return;
+  Object.defineProperty(proto, '__dr_shimmed_addListener', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
 
-    if (!isEmitter && nativeModule) {
-      const name = getModuleName(nativeModule);
-      try {
-        console.warn(
-          `[SafeEmitterShim] Suppressed NativeEventEmitter for non-emitter: ${name}`
-        );
-      } catch {}
-    }
-  }
+  const originalAdd: AnyFn = proto.addListener;
 
-  addListener(eventType: string, listener: AnyFn, context?: any) {
-    // Cold-start guard for iOS 18
+  proto.addListener = function addListenerPatched(
+    eventType: string,
+    listener: AnyFn,
+    context?: any
+  ) {
+    const nativeModule = (this as any)?._nativeModule;
+
+    // Gate early listeners on iOS 18 cold‑start until UI is mounted
     if (Platform.OS === 'ios' && !EMITTERS_UNLOCKED) {
       if (LOGGED < MAX_LOG) {
         try {
-          const name = this.__nativeModule
-            ? getModuleName(this.__nativeModule)
-            : 'UnknownNativeModule';
           console.warn(
-            `[SafeEmitterShim] blocked addListener(${String(eventType)}) on ${name} during cold-start`
+            `[SafeEmitterShim] blocked addListener(${String(
+              eventType
+            )}) on ${getName(nativeModule)} during cold-start`
           );
         } catch {}
         LOGGED++;
@@ -70,14 +97,34 @@ class SafeNativeEventEmitter extends OriginalNEE {
       return { remove() {} } as any;
     }
 
-    // Non-emitter: swallow and return a disposable stub
-    if (!this.__nativeModule) {
+    if (!isRealEmitter(nativeModule)) {
+      if (nativeModule) {
+        try {
+          console.warn(
+            `[SafeEmitterShim] Suppressed addListener on non-emitter: ${getName(nativeModule)}`
+          );
+        } catch {}
+      }
       return { remove() {} } as any;
     }
 
-    return super.addListener(eventType, listener, context);
-  }
-}
+    return originalAdd.call(this, eventType, listener, context);
+  };
+})();
 
-// Patch the RN export before anything else imports it
-(RN as any).NativeEventEmitter = SafeNativeEventEmitter;
+// --------- Optional legacy global alias (safe) ----------------------------
+try {
+  const G: any = globalThis as any;
+  if (typeof G.RCTDeviceEventEmitter === 'undefined') {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { RCTDeviceEventEmitter } = require(
+      'react-native/Libraries/EventEmitter/RCTDeviceEventEmitter'
+    );
+    Object.defineProperty(G, 'RCTDeviceEventEmitter', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: RCTDeviceEventEmitter,
+    });
+  }
+} catch {}

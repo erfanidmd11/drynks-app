@@ -1,77 +1,89 @@
 // src/screens/Dates/JoinRequestsScreen.tsx
-// Production-ready (feed-parity visuals, realtime, gesture-safe).
-// Shows *my* pending join requests. I can cancel (swipe ← or button).
-//
-// Backend assumptions (from your SQL):
-// - Table: public.join_requests (requester_id, recipient_id, date_id, status ...)
-// - On host acceptance/decline, join_requests.status updates away from 'pending'.
-// - Acceptance adds me to public.event_attendees and ensures chat membership.
-// - Date cancellations delete the row from public.dates (handled here via realtime).
+// Production-ready (RN 0.81 safe; no RNGH gestures).
+// HOST VIEW: shows all *incoming* pending join requests for dates I created.
+// - Grouped by date (title/time/location cover).
+// - Each requester appears as a profile card with Accept / Decline.
+// - Realtime: join_requests (recipient_id = me) + dates updates/deletes.
+// - Feed fallback: vw_feed_dates_v2 -> vw_feed_dates -> date_requests (never drop rows).
 
-import React, {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Dimensions,
   FlatList,
   RefreshControl,
   StyleSheet,
   Text,
   View,
   Platform,
+  Image,
   TouchableOpacity,
+  SectionList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, {
-  FadeInUp,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
-
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '@config/supabase';
 import AppShell from '@components/AppShell';
 import DateCard from '@components/cards/DateCard';
+import { notifyJoinRequestAccepted as notifyJoinRequestAcceptedPush } from '@services/NotificationService';
 
 type UUID = string;
 
 const DRYNKS_RED   = '#E34E5C';
-const DRYNKS_BLUE  = '#232F39';
+const DRYNKS_GREEN = '#22C55E';
 const DRYNKS_TEXT  = '#2B2B2B';
-const SCREEN_W     = Dimensions.get('window').width;
+const CHIP_BG      = Platform.select({ ios: '#F8FAFB', android: '#F2F5F7', default: '#F2F5F7' });
 
-/* ----------------------------- helpers ----------------------------- */
+/* ─────────────────────────── date/time helpers ─────────────────────────── */
+
+function getYMDInTZ(date: Date, timeZone: string): { y: number; m: number; d: number } {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  let y = 0, m = 0, d = 0;
+  for (const p of parts) {
+    if (p.type === 'year')  y = parseInt(p.value, 10);
+    if (p.type === 'month') m = parseInt(p.value, 10);
+    if (p.type === 'day')   d = parseInt(p.value, 10);
+  }
+  return { y, m, d };
+}
+
+function isPastLocalEndOfDay(eventISO?: string | null, timeZone?: string | null): boolean {
+  if (!eventISO) return false;
+  try {
+    const event = new Date(eventISO);
+    if (!Number.isFinite(event.valueOf())) return false;
+    if (!timeZone) return event.getTime() < Date.now();
+    const e = getYMDInTZ(event, timeZone);
+    const n = getYMDInTZ(new Date(), timeZone);
+    return (n.y * 10000 + n.m * 100 + n.d) > (e.y * 10000 + e.m * 100 + e.d);
+  } catch {
+    const d = new Date(eventISO);
+    return Number.isFinite(d.valueOf()) && d.getTime() < Date.now();
+  }
+}
+
+function formatEventDay(eventISO?: string | null, timeZone?: string | null): string | null {
+  if (!eventISO) return null;
+  try {
+    const d = new Date(eventISO);
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone || 'UTC', weekday: 'short', month: 'short', day: 'numeric',
+    }).format(d);
+  } catch { return null; }
+}
+
 const looksLikeWKTOrHex = (s?: string | null) =>
   !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(String(s)));
 
-const sumRemaining = (rgc?: any): number => {
-  if (!rgc) return 0;
-  if (typeof rgc === 'string') {
-    try { rgc = JSON.parse(rgc); } catch { return 0; }
-  }
-  if (typeof rgc !== 'object') return 0;
-  return Object.values(rgc).reduce(
-    (a: number, b: any) => a + (typeof b === 'number' ? b : Number(b) || 0),
-    0
-  );
-};
+/* ─────────────────────────────── DB shapes ─────────────────────────────── */
 
-/* ------------------------------ DB shapes ----------------------------- */
 type JoinRow = {
   id: UUID;
   status: 'pending' | 'accepted' | 'cancelled' | 'dismissed' | 'removed_by_host' | string;
   requester_id: UUID;
-  recipient_id: UUID; // host (pinned by trigger)
+  recipient_id: UUID; // host (you)
   date_id: UUID;
   created_at: string;
 };
@@ -106,44 +118,14 @@ type ProfileLite = {
 
 type WhoPaysLite = { who_pays: string | null; event_timezone: string | null };
 
-type JoinItem = {
-  req_id: UUID;
-  date_id: UUID;
-  created_at: string;
+/* ───────────────────── data fetchers (robust) ───────────────────── */
 
-  // DateCard shape
-  title: string | null;
-  event_date: string | null;
-  event_timezone: string | null;
-  location: string | null;
-  who_pays: string | null;
-  event_type: string | null;
-  orientation_preference: string[] | null;
-  spots: number | null;
-  remaining_gender_counts: Record<string, number> | null;
-
-  creator_id: UUID;
-  creator_profile: ProfileLite | null;
-
-  profile_photo: string | null; // host avatar
-  photo_urls: string[];         // event photos only
-  cover_image_url: string | null;
-};
-
-/* --------------------------- table detection -------------------------- */
-async function detectJoinRequests(viewer: UUID): Promise<'join_requests' | null> {
-  const { error } = await supabase
-    .from('join_requests')
-    .select('id, requester_id, recipient_id, status, date_id, created_at')
-    .eq('requester_id', viewer)
-    .limit(1);
-  return error ? null : 'join_requests';
-}
-
-/* --------------------------- feed helpers --------------------------- */
 async function fetchFeedRowsFor(dateIds: UUID[]): Promise<FeedBase[]> {
   if (!dateIds.length) return [];
-  // Try v2 first
+  const out: FeedBase[] = [];
+  const missing = new Set(dateIds);
+
+  // v2
   try {
     const { data, error } = await supabase
       .from('vw_feed_dates_v2')
@@ -154,19 +136,64 @@ async function fetchFeedRowsFor(dateIds: UUID[]): Promise<FeedBase[]> {
       `)
       .in('id', dateIds);
     if (error) throw error;
-    if (Array.isArray(data) && data.length) return data as FeedBase[];
-  } catch { /* fall through */ }
+    for (const r of (data || []) as any[]) {
+      out.push(r as FeedBase);
+      missing.delete(r.id);
+    }
+  } catch { /* fallback */ }
 
-  // Fallback to v1
-  const { data } = await supabase
-    .from('vw_feed_dates')
-    .select(`
-      id, creator, event_type, event_date, location, created_at,
-      accepted_users, orientation_preference, spots, remaining_gender_counts,
-      photo_urls, profile_photo
-    `)
-    .in('id', dateIds);
-  return (data || []) as FeedBase[];
+  // v1
+  if (missing.size) {
+    try {
+      const { data } = await supabase
+        .from('vw_feed_dates')
+        .select(`
+          id, creator, event_type, event_date, location, created_at,
+          accepted_users, orientation_preference, spots, remaining_gender_counts,
+          photo_urls, profile_photo
+        `)
+        .in('id', Array.from(missing));
+      for (const r of (data || []) as any[]) {
+        out.push(r as FeedBase);
+        missing.delete(r.id);
+      }
+    } catch { /* fallback */ }
+  }
+
+  // final: date_requests so we never drop brand‑new rows
+  if (missing.size) {
+    try {
+      const { data } = await supabase
+        .from('date_requests')
+        .select(`
+          id, creator, event_type, title, event_date, location, created_at,
+          accepted_users, orientation_preference, spots, photo_urls, profile_photo
+        `)
+        .in('id', Array.from(missing));
+      for (const r of (data || []) as any[]) {
+        out.push({
+          id: r.id,
+          creator: r.creator,
+          event_type: r.event_type ?? null,
+          title: r.title ?? null,
+          event_date: r.event_date ?? null,
+          location: r.location ?? null,
+          created_at: r.created_at ?? null,
+          accepted_users: Array.isArray(r.accepted_users) ? r.accepted_users : null,
+          orientation_preference: Array.isArray(r.orientation_preference) ? r.orientation_preference : null,
+          spots: typeof r.spots === 'number' ? r.spots : null,
+          remaining_gender_counts: null,
+          photo_urls: Array.isArray(r.photo_urls) ? r.photo_urls : null,
+          profile_photo: r.profile_photo ?? null,
+          date_cover: null,
+          creator_photo: null,
+        } as FeedBase);
+        missing.delete(r.id);
+      }
+    } catch { /* ignore */ }
+  }
+
+  return out;
 }
 
 async function fetchProfilesMap(ids: UUID[]): Promise<Map<UUID, ProfileLite>> {
@@ -185,7 +212,6 @@ async function fetchWhoPaysMap(dateIds: UUID[]): Promise<Map<UUID, WhoPaysLite>>
   const out = new Map<UUID, WhoPaysLite>();
   if (!dateIds.length) return out;
 
-  // Prefer dates (if present) else fallback to date_requests
   try {
     const { data } = await supabase.from('dates').select('id, who_pays, event_timezone').in('id', dateIds);
     (data || []).forEach((r: any) => out.set(r.id, { who_pays: r.who_pays ?? null, event_timezone: r.event_timezone ?? null }));
@@ -200,115 +226,84 @@ async function fetchWhoPaysMap(dateIds: UUID[]): Promise<Map<UUID, WhoPaysLite>>
   return out;
 }
 
-/* --------------------------- Row (card) ---------------------------- */
-type RowProps = {
-  index: number;
-  me: string;
-  item: JoinItem;
-  onCancel: (row: JoinItem) => void;
+/* ─────────────────────── derived UI types ─────────────────────── */
+
+type RequesterCard = {
+  req_id: UUID;
+  requester_id: UUID;
+  created_at: string;
+  requester: ProfileLite | null;
 };
 
-const RowItem = React.memo<RowProps>(({ index, me, item, onCancel }) => {
-  const navigation = useNavigation<any>();
-  const tx = useSharedValue(0);
-  const threshold = Math.min(140, SCREEN_W * 0.30);
+type DateSection = {
+  date_id: UUID;
+  title: string | null;
+  event_date: string | null;
+  event_timezone: string | null;
+  location: string | null;
+  who_pays: string | null;
 
-  // Let DateCard's internal FlatList receive horizontal swipes
-  const nativeScroll = Gesture.Native();
+  cover_image_url: string | null;
+  host_id: UUID;
+  host_profile: ProfileLite | null;
 
-  const pan = Gesture.Pan()
-    .activeOffsetX([-40, 40])
-    .failOffsetY([-12, 12])
-    .simultaneousWithExternalGesture(nativeScroll)
-    .onStart(() => { tx.value = 0; })
-    .onUpdate((e) => { tx.value = e.translationX; })
-    .onEnd((e) => {
-      if (e.translationX < -threshold) {
-        tx.value = withSpring(-SCREEN_W, {}, () => runOnJS(onCancel)(item));
-      } else {
-        tx.value = withSpring(0);
-      }
-    });
+  data: RequesterCard[]; // SectionList requires 'data'
+};
 
-  const rowStyle = useAnimatedStyle(() => ({ transform: [{ translateX: tx.value }] }));
+/* ────────────────────────── small UI bits ────────────────────────── */
 
-  const remaining = sumRemaining(item.remaining_gender_counts);
-  const expired = (() => {
-    const iso = item.event_date;
-    if (!iso) return false;
-    const d = new Date(iso);
-    return Number.isFinite(d.valueOf()) ? d < new Date() : false;
-  })();
+const Avatar: React.FC<{ uri?: string | null; size?: number }> = ({ uri, size = 44 }) => (
+  uri
+    ? <Image source={{ uri }} style={{ width: size, height: size, borderRadius: Math.round(size/2), backgroundColor: '#EEE' }} />
+    : <View style={{ width: size, height: size, borderRadius: Math.round(size/2), backgroundColor: '#E5E7EB', alignItems: 'center', justifyContent: 'center' }}>
+        <Text style={{ color: '#6B7280', fontWeight: '700' }}>?</Text>
+      </View>
+);
 
-  const disabled = expired || (Number.isFinite(remaining) && remaining <= 0);
+const Pill: React.FC<{ color?: string; bg?: string; text: string }> = ({ color = '#1F2937', bg = CHIP_BG!, text }) => (
+  <View style={{ backgroundColor: bg, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 }}>
+    <Text style={{ color, fontSize: 12, fontWeight: '700' }}>{text}</Text>
+  </View>
+);
 
+/* ─────────────────────────── request card ─────────────────────────── */
+
+const RequesterRow: React.FC<{
+  req: RequesterCard;
+  onAccept: (req: RequesterCard) => void;
+  onDecline: (req: RequesterCard) => void;
+}> = ({ req, onAccept, onDecline }) => {
   return (
-    <GestureDetector gesture={pan}>
-      <Animated.View entering={FadeInUp.delay(index * 50).duration(300)} style={styles.rowWrap}>
-        {/* Status + explicit Cancel for accessibility */}
-        <View style={styles.headRow}>
-          <Text style={styles.statusPill}>Pending</Text>
-          <TouchableOpacity onPress={() => onCancel(item)} style={styles.cancelChip} accessibilityRole="button">
-            <Ionicons name="close-circle-outline" size={16} color="#991B1B" />
-            <Text style={styles.cancelText}>Cancel Request</Text>
-          </TouchableOpacity>
-        </View>
-
-        <Animated.View style={rowStyle}>
-          <GestureDetector gesture={nativeScroll}>
-            <View>
-              <DateCard
-                date={{
-                  id: item.date_id,
-                  title: item.title ?? undefined,
-                  event_date: item.event_date ?? undefined,
-                  event_timezone: item.event_timezone ?? undefined,
-                  location: item.location ?? undefined,
-
-                  creator_id: item.creator_id,
-                  creator_profile: item.creator_profile ?? undefined,
-                  accepted_profiles: [],
-
-                  who_pays: item.who_pays ?? undefined,
-                  event_type: item.event_type ?? undefined,
-                  orientation_preference: item.orientation_preference ?? undefined,
-                  spots: item.spots ?? undefined,
-                  remaining_gender_counts: item.remaining_gender_counts ?? undefined,
-
-                  // FEED-PARITY GALLERY: cover + event photos; host avatar via profile_photo
-                  profile_photo: item.profile_photo ?? undefined,    // host avatar (fallback)
-                  photo_urls: item.photo_urls ?? undefined,          // event photos ONLY
-                  cover_image_url: item.cover_image_url ?? undefined,
-                }}
-                userId={me}
-                isCreator={false}
-                isAccepted={false}
-                disabled={!!disabled}
-                disableFooterCtas
-                // IMPORTANT: avoid onPressCard; deep-link to host profile is still available
-                onPressProfile={(pid) =>
-                  navigation.navigate('PublicProfile', { userId: pid, origin: 'JoinRequests' })
-                }
-              />
-            </View>
-          </GestureDetector>
-        </Animated.View>
-      </Animated.View>
-    </GestureDetector>
+    <View style={styles.reqRow}>
+      <Avatar uri={req.requester?.profile_photo ?? null} size={48} />
+      <View style={{ flex: 1, marginHorizontal: 10 }}>
+        <Text style={styles.reqName} numberOfLines={1}>
+          {req.requester?.screenname || 'New member'}
+        </Text>
+        <Text style={styles.reqSub} numberOfLines={1}>
+          Requested {new Date(req.created_at).toLocaleDateString()}
+        </Text>
+      </View>
+      <TouchableOpacity onPress={() => onDecline(req)} style={[styles.actionBtn, { backgroundColor: '#FFE4E6' }]}>
+        <Ionicons name="close" size={18} color="#991B1B" />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={() => onAccept(req)} style={[styles.actionBtn, { backgroundColor: '#DCFCE7', marginLeft: 8 }]}>
+        <Ionicons name="checkmark" size={18} color="#166534" />
+      </TouchableOpacity>
+    </View>
   );
-});
+};
 
-/* ------------------------------ Screen ------------------------------ */
+/* ────────────────────────────── screen ────────────────────────────── */
 
 const JoinRequestsScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   useLayoutEffect(() => { navigation.setOptions?.({ headerShown: false }); }, [navigation]);
 
   const [me, setMe] = useState<UUID | null>(null);
-  const [rows, setRows] = useState<JoinItem[]>([]);
+  const [sections, setSections] = useState<DateSection[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tableReady, setTableReady] = useState<boolean>(true);
 
   // realtime channels
   const chReqRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -320,232 +315,204 @@ const JoinRequestsScreen: React.FC = () => {
     chReqRef.current = null; chDatesRef.current = null;
   }, []);
 
-  /** Build DateCard items from feed rows + profiles + whoPays map */
-  const buildItems = useCallback((
-    joinRows: JoinRow[],
-    feedById: Map<UUID, FeedBase>,
-    profiles: Map<UUID, ProfileLite>,
-    whoPaysMap: Map<UUID, WhoPaysLite>
-  ): JoinItem[] => {
-    return joinRows.map((jr) => {
+  const attachRealtime = useCallback((viewer: UUID, dateIds: UUID[]) => {
+    detachRealtime();
+
+    // join_requests where I'm the recipient (host)
+    chReqRef.current = supabase
+      .channel('rx_host_join_requests')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'join_requests', filter: `recipient_id=eq.${viewer}` },
+        async (payload: any) => {
+          const jr = payload?.new as JoinRow | undefined;
+          if (!jr || String(jr.status).toLowerCase() !== 'pending') return;
+          await mergeNewJoinRow(jr);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'join_requests', filter: `recipient_id=eq.${viewer}` },
+        (payload: any) => {
+          const next = payload?.new as JoinRow | undefined;
+          if (!next) return;
+          if (String(next.status).toLowerCase() !== 'pending') {
+            setSections(prev => removeRequest(prev, next.id));
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'join_requests', filter: `recipient_id=eq.${viewer}` },
+        (payload: any) => {
+          const old = payload?.old as JoinRow | undefined;
+          if (!old?.id) return;
+          setSections(prev => removeRequest(prev, old.id));
+        }
+      )
+      .subscribe(() => {});
+
+    if (dateIds.length) {
+      const idList = dateIds.join(',');
+      chDatesRef.current = supabase
+        .channel('rx_host_join_requests_dates')
+        .on(
+          'postgres_changes',
+          { event: 'DELETE', schema: 'public', table: 'dates', filter: `id=in.(${idList})` },
+          (payload: any) => {
+            const old = payload?.old as any;
+            if (old?.id) setSections(prev => prev.filter(s => s.date_id !== old.id));
+          }
+        )
+        .subscribe(() => {});
+    }
+  }, [detachRealtime]);
+
+  /* ――― utilities to mutate sections ――― */
+
+  function removeRequest(prev: DateSection[], reqId: UUID): DateSection[] {
+    const next = prev.map(sec => ({ ...sec, data: sec.data.filter(r => r.req_id !== reqId) }))
+                     .filter(sec => sec.data.length > 0);
+    return next;
+  }
+
+  async function mergeNewJoinRow(jr: JoinRow) {
+    // Load minimal data for this single row
+    const [feed, whoPays, requesterProfile] = await Promise.all([
+      fetchFeedRowsFor([jr.date_id]).then(rows => rows[0]),
+      fetchWhoPaysMap([jr.date_id]).then(m => m.get(jr.date_id) || { who_pays: null, event_timezone: null }),
+      fetchProfilesMap([jr.requester_id]).then(m => m.get(jr.requester_id) || null),
+    ]);
+
+    // If feed row is still missing, try date_requests (already part of fetchFeedRowsFor fallback).
+    if (!feed) return;
+
+    const when = formatEventDay(feed.event_date, (whoPays as any)?.event_timezone ?? null);
+    const cover =
+      (feed as any).date_cover ||
+      (Array.isArray(feed.photo_urls) && feed.photo_urls[0]) ||
+      feed.profile_photo ||
+      (feed as any).creator_photo ||
+      null;
+
+    const secBase: Omit<DateSection, 'data'> = {
+      date_id: feed.id,
+      title: (feed as any).title ?? feed.event_type ?? null,
+      event_date: feed.event_date ?? null,
+      event_timezone: (whoPays as any)?.event_timezone ?? null,
+      location: !looksLikeWKTOrHex(feed.location) ? (feed.location ?? null) : null,
+      who_pays: (whoPays as any)?.who_pays ?? null,
+      cover_image_url: cover,
+      host_id: feed.creator,
+      host_profile: null, // could fetch if needed; not required here
+    };
+
+    const card: RequesterCard = {
+      req_id: jr.id,
+      requester_id: jr.requester_id,
+      created_at: jr.created_at,
+      requester: requesterProfile,
+    };
+
+    setSections(prev => {
+      const idx = prev.findIndex(s => s.date_id === feed.id);
+      if (idx === -1) return [{ ...secBase, data: [card] }, ...prev];
+      const exists = prev[idx].data.some(r => r.req_id === card.req_id);
+      if (exists) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], data: [card, ...next[idx].data] };
+      return next;
+    });
+  }
+
+  /* ――― fetch initial (host‑side) rows ――― */
+
+  const fetchRows = useCallback(async (uid?: UUID | null) => {
+    const viewer = (uid ?? me) as UUID | null;
+    if (!viewer) {
+      setSections([]); setLoading(false); setRefreshing(false); detachRealtime(); return;
+    }
+    if (!refreshing) setLoading(true);
+
+    // 1) rows where I'm the recipient (host): pending requests
+    const { data, error } = await supabase
+      .from('join_requests')
+      .select('id, status, requester_id, recipient_id, date_id, created_at')
+      .eq('recipient_id', viewer)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[JoinRequests(host)] fetch error', error);
+      setSections([]); setLoading(false); setRefreshing(false);
+      return;
+    }
+
+    const joinRows = (data || []) as JoinRow[];
+    if (!joinRows.length) {
+      setSections([]); setLoading(false); setRefreshing(false);
+      attachRealtime(viewer, []);
+      return;
+    }
+
+    const dateIds = Array.from(new Set(joinRows.map(r => r.date_id)));
+    const requesterIds = Array.from(new Set(joinRows.map(r => r.requester_id)));
+
+    // 2) date feed/base
+    const [feedRows, profilesMap, whoPaysMap] = await Promise.all([
+      fetchFeedRowsFor(dateIds),
+      fetchProfilesMap(requesterIds),
+      fetchWhoPaysMap(dateIds),
+    ]);
+    const feedById = new Map(feedRows.map(r => [r.id, r]));
+
+    // 3) build grouped sections
+    const map = new Map<UUID, DateSection>();
+    for (const jr of joinRows) {
       const r = feedById.get(jr.date_id);
-      if (!r) return null as any;
+      if (!r) continue;
 
-      // Host: prefer feed.creator; fallback to pinned recipient_id
-      const hostId = (r.creator || jr.recipient_id) as UUID;
-      let creator_profile = profiles.get(hostId) || null;
-
-      // Host avatar: profile beats feed fallback
-      const hostAvatar = creator_profile?.profile_photo || (r as any).creator_photo || r.profile_photo || null;
-
-      // If we have an avatar but not a full profile, synthesize minimal
-      if (!creator_profile && hostAvatar) {
-        creator_profile = {
-          id: hostId,
-          screenname: null,
-          profile_photo: hostAvatar,
-          gender: null,
-          location: null,
-          birthdate: null,
-          preferences: null,
-        };
-      }
-
-      // Location tidy (avoid WKT)
-      const cleanLoc = !looksLikeWKTOrHex(r.location)
-        ? r.location
-        : (creator_profile?.location ?? null);
-
-      // Cover for tag + first slide (prefer date_cover)
+      const wp = whoPaysMap.get(r.id) || { who_pays: null, event_timezone: null };
       const cover =
         (r as any).date_cover ||
         (Array.isArray(r.photo_urls) && r.photo_urls[0]) ||
         r.profile_photo ||
         (r as any).creator_photo ||
-        creator_profile?.profile_photo ||
         null;
 
-      // Event photo list (no host avatar here)
-      const photo_urls: string[] =
-        Array.isArray(r.photo_urls) && r.photo_urls.length
-          ? r.photo_urls
-          : (cover ? [cover] : []);
+      if (!map.has(r.id)) {
+        map.set(r.id, {
+          date_id: r.id,
+          title: (r as any).title ?? r.event_type ?? null,
+          event_date: r.event_date ?? null,
+          event_timezone: wp.event_timezone ?? null,
+          location: !looksLikeWKTOrHex(r.location) ? (r.location ?? null) : null,
+          who_pays: wp.who_pays ?? null,
+          cover_image_url: cover,
+          host_id: r.creator,
+          host_profile: null,
+          data: [],
+        });
+      }
 
-      const wp = whoPaysMap.get(r.id) || { who_pays: null, event_timezone: null };
-
-      return {
+      const sec = map.get(r.id)!;
+      sec.data.push({
         req_id: jr.id,
-        date_id: r.id,
+        requester_id: jr.requester_id,
         created_at: jr.created_at,
+        requester: profilesMap.get(jr.requester_id) || null,
+      });
+    }
 
-        title: (r as any).title ?? r.event_type ?? null, // nicer tag title
-        event_date: r.event_date ?? null,
-        event_timezone: wp.event_timezone ?? null,
-        location: cleanLoc ?? null,
-        who_pays: wp.who_pays ?? null,
-        event_type: r.event_type ?? null,
-        orientation_preference: Array.isArray(r.orientation_preference) ? r.orientation_preference : null,
-        spots: r.spots ?? null,
-        remaining_gender_counts: (r.remaining_gender_counts as any) ?? null,
+    // newest sections first; inside each, newest requests first
+    const sectionsBuilt = Array.from(map.values())
+      .map(s => ({ ...s, data: s.data.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)) }))
+      .sort((a, b) => ((a.event_date || '') < (b.event_date || '') ? 1 : -1));
 
-        creator_id: hostId,
-        creator_profile,
-
-        profile_photo: hostAvatar,
-        photo_urls,
-        cover_image_url: cover,
-      } as JoinItem;
-    }).filter(Boolean) as JoinItem[];
-  }, []);
-
-  const attachRealtime = useCallback(
-    (viewer: UUID, dateIds: UUID[]) => {
-      detachRealtime();
-
-      // join_requests changes (INSERT/UPDATE/DELETE) for me
-      chReqRef.current = supabase
-        .channel('join_requests_my_rows')
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'join_requests', filter: `requester_id=eq.${viewer}` },
-          async (payload: any) => {
-            const jr = payload?.new as JoinRow | undefined;
-            if (!jr || jr.status !== 'pending') return;
-
-            // Load feed row + host profile + whoPays for this one date
-            const [feedRows, whoPaysMap] = await Promise.all([
-              fetchFeedRowsFor([jr.date_id]),
-              fetchWhoPaysMap([jr.date_id]),
-            ]);
-
-            if (!feedRows.length) return;
-            const feed = feedRows[0];
-            const hostId = (feed.creator || jr.recipient_id) as UUID;
-
-            const profilesMap = await fetchProfilesMap([hostId]);
-            const items = buildItems([jr], new Map([[feed.id, feed]]), profilesMap, whoPaysMap);
-            if (!items.length) return;
-            const item = items[0];
-
-            setRows((prev) => (prev.some((r) => r.req_id === item.req_id) ? prev : [item, ...prev]));
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'join_requests', filter: `requester_id=eq.${viewer}` },
-          (payload: any) => {
-            const next = payload?.new as JoinRow | undefined;
-            if (!next) return;
-            if (next.status !== 'pending') {
-              setRows((prev) => prev.filter((r) => r.req_id !== next.id));
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: 'DELETE', schema: 'public', table: 'join_requests', filter: `requester_id=eq.${viewer}` },
-          (payload: any) => {
-            const old = payload?.old as JoinRow | undefined;
-            if (!old) return;
-            setRows((prev) => prev.filter((r) => r.req_id !== old.id));
-          }
-        )
-        .subscribe(() => {});
-
-      // Dates watch (capacity / deletion) — table-level events (views don’t emit realtime)
-      if (dateIds.length) {
-        const idList = dateIds.join(',');
-        chDatesRef.current = supabase
-          .channel('join_requests_dates_watch')
-          .on(
-            'postgres_changes',
-            { event: 'UPDATE', schema: 'public', table: 'dates', filter: `id=in.(${idList})` },
-            (payload: any) => {
-              const d = payload?.new as any;
-              const remaining = sumRemaining(d?.remaining_gender_counts ?? d?.preferred_gender_counts);
-              if (Number.isFinite(remaining) && remaining <= 0) {
-                setRows((prev) => prev.filter((r) => r.date_id !== d.id));
-              }
-            }
-          )
-          .on(
-            'postgres_changes',
-            { event: 'DELETE', schema: 'public', table: 'dates', filter: `id=in.(${idList})` },
-            (payload: any) => {
-              const old = payload?.old as any;
-              if (old?.id) setRows((prev) => prev.filter((r) => r.date_id !== old.id));
-            }
-          )
-          .subscribe(() => {});
-      }
-    },
-    [detachRealtime, buildItems]
-  );
-
-  const fetchRows = useCallback(
-    async (uid?: UUID | null) => {
-      const viewer = (uid ?? me) as UUID | null;
-      if (!viewer) {
-        setRows([]); setLoading(false); setRefreshing(false);
-        detachRealtime();
-        return;
-      }
-
-      if (!refreshing) setLoading(true);
-
-      const table = await detectJoinRequests(viewer);
-      const ready = !!table;
-      setTableReady(ready);
-      if (!ready) {
-        setRows([]); setLoading(false); setRefreshing(false);
-        detachRealtime();
-        return;
-      }
-
-      // 1) My pending join requests
-      const { data, error } = await supabase
-        .from('join_requests')
-        .select('id, status, requester_id, recipient_id, date_id, created_at')
-        .eq('requester_id', viewer)
-        .eq('status', 'pending')
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('[JoinRequests] fetch rows error', error);
-        setRows([]); setLoading(false); setRefreshing(false);
-        return;
-      }
-
-      const joinRows = (data || []) as JoinRow[];
-      if (!joinRows.length) {
-        setRows([]); setLoading(false); setRefreshing(false);
-        attachRealtime(viewer, []);
-        return;
-      }
-
-      const dateIds = Array.from(new Set(joinRows.map((r) => r.date_id)));
-
-      // 2) Feed rows (same as Date Feed / Received Invites)
-      const feedRows = await fetchFeedRowsFor(dateIds);
-      const feedById = new Map(feedRows.map((r) => [r.id, r]));
-
-      // 3) Enrichment: who_pays/timezone + profiles (creators ∪ recipients)
-      const whoPaysMap = await fetchWhoPaysMap(dateIds);
-
-      const creatorIds = feedRows.map((r) => r.creator).filter(Boolean) as UUID[];
-      const recipientIds = joinRows.map((r) => r.recipient_id);
-      const profilesMap = await fetchProfilesMap([...creatorIds, ...recipientIds]);
-
-      // 4) Build items in feed-parity shape
-      const items = buildItems(joinRows, feedById, profilesMap, whoPaysMap);
-      setRows(items);
-      setLoading(false);
-      setRefreshing(false);
-
-      attachRealtime(viewer, dateIds);
-    },
-    [me, refreshing, attachRealtime, detachRealtime, buildItems]
-  );
+    setSections(sectionsBuilt);
+    setLoading(false); setRefreshing(false);
+    attachRealtime(viewer, dateIds);
+  }, [me, refreshing, attachRealtime, detachRealtime]);
 
   const onRefresh = useCallback(() => { setRefreshing(true); fetchRows(); }, [fetchRows]);
 
@@ -563,51 +530,57 @@ const JoinRequestsScreen: React.FC = () => {
   // focus refresh
   useFocusEffect(React.useCallback(() => { fetchRows(); return () => {}; }, [fetchRows]));
 
-  /* ------------------------------ actions ------------------------------ */
-  const cancelRequest = useCallback(
-    async (row: JoinItem) => {
-      if (!tableReady) {
-        Alert.alert('Not available', 'Join requests are not enabled in this environment yet.');
-        return;
-      }
+  /* ─────────────────────────── actions ─────────────────────────── */
+
+  const acceptRequest = useCallback(async (req: RequesterCard, section: DateSection) => {
+    try {
+      const { error } = await supabase
+        .from('join_requests')
+        .update({ status: 'accepted' })
+        .eq('id', req.req_id);
+      if (error) throw error;
+
+      // optimistic UI
+      setSections(prev => removeRequest(prev, req.req_id));
+
+      // optional push/bell to requester
       try {
-        const { error } = await supabase
-          .from('join_requests')
-          .update({ status: 'cancelled' })
-          .eq('id', row.req_id);
-        if (error) throw error;
+        await notifyJoinRequestAcceptedPush?.({
+          requesterId: req.requester_id,
+          dateId: section.date_id,
+          eventTitle: section.title ?? 'Your request',
+        });
+      } catch { /* non-fatal */ }
+    } catch (e: any) {
+      console.error('[JoinRequests(host)] accept error', e);
+      Alert.alert('Error', e?.message || 'Could not accept the request.');
+    }
+  }, []);
 
-        // optimistic remove
-        setRows((prev) => prev.filter((r) => r.req_id !== row.req_id));
+  const declineRequest = useCallback(async (req: RequesterCard) => {
+    try {
+      const { error } = await supabase
+        .from('join_requests')
+        .update({ status: 'dismissed' })
+        .eq('id', req.req_id);
+      if (error) throw error;
 
-        // clear local "requested_<dateId>" so the button resets elsewhere
-        try { await AsyncStorage.removeItem(`requested_${row.date_id}`); } catch {}
+      // optimistic UI
+      setSections(prev => removeRequest(prev, req.req_id));
+    } catch (e: any) {
+      console.error('[JoinRequests(host)] decline error', e);
+      Alert.alert('Error', e?.message || 'Could not decline the request.');
+    }
+  }, []);
 
-        // optional: notify host
-        try {
-          await supabase.from('notifications').insert([{
-            user_id: row.creator_id,
-            message: `Request rescinded for "${row.title ?? 'a date'}"`,
-            screen: 'MyDates',
-            params: { date_id: row.date_id, req_id: row.req_id },
-          }]);
-        } catch {}
-      } catch (e: any) {
-        console.error('[JoinRequests] cancel error', e);
-        Alert.alert('Error', e?.message || 'Could not cancel your request.');
-      }
-    },
-    [tableReady]
-  );
-
-  /* ------------------------------- UI branches ------------------------------ */
+  /* ─────────────────────────── UI branches ─────────────────────────── */
 
   if (loading) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
+      <AppShell headerTitle="Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
           <ActivityIndicator />
-          <Text style={{ marginTop: 10, color: '#666' }}>Loading your join requests…</Text>
+          <Text style={{ marginTop: 10, color: '#666' }}>Loading join requests…</Text>
         </View>
       </AppShell>
     );
@@ -615,98 +588,150 @@ const JoinRequestsScreen: React.FC = () => {
 
   if (!me) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
+      <AppShell headerTitle="Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
-          <Text style={styles.emptyText}>You’re incognito—sign in to see your join requests. 🕵️‍♀️</Text>
+          <Text style={styles.emptyText}>Sign in to view requests for your dates.</Text>
         </View>
       </AppShell>
     );
   }
 
-  if (!tableReady) {
+  if (!sections.length) {
     return (
-      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
+      <AppShell headerTitle="Join Requests" showBack currentTab="My DrYnks">
         <View style={styles.centered}>
-          <Text style={styles.emptyText}>Join requests aren’t enabled in this environment yet.</Text>
+          <Text style={styles.emptyText}>No pending join requests right now.</Text>
         </View>
       </AppShell>
     );
   }
 
-  if (!rows.length) {
-    return (
-      <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
-        <View style={styles.centered}>
-          <Text style={styles.emptyText}>
-            No join requests on the board. Your social calendar is chilling on ice. 🧊
-          </Text>
-        </View>
-      </AppShell>
-    );
-  }
-
-  /* ---------------------------------- main ---------------------------------- */
+  /* ───────────────────────────── main UI ───────────────────────────── */
 
   return (
-    <AppShell headerTitle="My Join Requests" showBack currentTab="My DrYnks">
-      <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 6 }}>
-        <Text style={{ textAlign: 'center', color: '#666' }}>
-          Swipe <Text style={{ fontWeight: '800', color: DRYNKS_RED }}>← Left</Text> to cancel your request
-        </Text>
-      </View>
-
-      <FlatList
-        data={rows}
-        keyExtractor={(it) => it.req_id}
+    <AppShell headerTitle="Join Requests" showBack currentTab="My DrYnks">
+      <SectionList
+        sections={sections}
+        keyExtractor={(item) => item.req_id}
         contentContainerStyle={{ padding: 16, paddingBottom: 24 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        initialNumToRender={6}
-        windowSize={10}
-        removeClippedSubviews
-        renderItem={({ item, index }) => (
-          <RowItem index={index} me={me!} item={item} onCancel={cancelRequest} />
+        renderSectionHeader={({ section }) => {
+          const when = formatEventDay(section.event_date, section.event_timezone);
+          return (
+            <View style={styles.section}>
+              {/* Tag header */}
+              <View style={styles.tag}>
+                {section.cover_image_url
+                  ? <Image source={{ uri: section.cover_image_url }} style={styles.tagAvatar} />
+                  : <View style={[styles.tagAvatar, styles.tagPlaceholder]}><Text style={styles.tagEmoji}>🍸</Text></View>
+                }
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.tagTitle} numberOfLines={1}>{section.title || 'Untitled date'}</Text>
+                  <Text style={styles.tagSub} numberOfLines={1}>
+                    {when || 'Upcoming'}{section.location ? ` · ${section.location}` : ''}
+                  </Text>
+                </View>
+                {section.who_pays ? <Pill text={section.who_pays === 'host' ? 'I pay' : section.who_pays} /> : null}
+              </View>
+
+              {/* DateCard (host context) */}
+              <DateCard
+                context="JOIN_REQUESTS_HOST"
+                date={{
+                  id: section.date_id,
+                  title: section.title ?? undefined,
+                  event_date: section.event_date ?? undefined,
+                  event_timezone: section.event_timezone ?? undefined,
+                  location: section.location ?? undefined,
+
+                  creator_id: section.host_id,
+                  creator_profile: section.host_profile ?? undefined,
+                  accepted_profiles: [],
+
+                  who_pays: section.who_pays ?? undefined,
+                  event_type: undefined,
+                  orientation_preference: undefined,
+                  spots: undefined,
+                  remaining_gender_counts: undefined,
+
+                  profile_photo: section.host_profile?.profile_photo ?? undefined,
+                  photo_urls: undefined,
+                  cover_image_url: section.cover_image_url ?? undefined,
+                }}
+                userId={me}
+                isCreator
+                disableFooterCtas
+              />
+            </View>
+          );
+        }}
+        renderItem={({ item, section }) => (
+          <RequesterRow
+            req={item}
+            onAccept={(r) => acceptRequest(r, section as DateSection)}
+            onDecline={declineRequest}
+          />
         )}
+        SectionSeparatorComponent={() => <View style={{ height: 24 }} />}
+        ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
       />
     </AppShell>
   );
 };
 
-/* --------------------------------- styles --------------------------------- */
+/* ────────────────────────────── styles ────────────────────────────── */
 
 const styles = StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   emptyText: { color: '#555', fontSize: 16, textAlign: 'center' },
 
-  rowWrap: { marginBottom: 16, borderRadius: 20 },
+  section: {
+    marginBottom: 12,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 8, shadowOffset: { width: 0, height: 2 } },
+      android: { elevation: 3 },
+    }),
+  },
 
-  headRow: {
-    marginBottom: 6,
-    paddingHorizontal: 2,
+  tag: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E6E8EA',
+    backgroundColor: '#FAFBFC',
   },
+  tagAvatar: { width: 28, height: 28, borderRadius: 6, marginRight: 8, backgroundColor: '#EEE' },
+  tagPlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  tagEmoji: { fontSize: 16 },
+  tagTitle: { color: DRYNKS_TEXT, fontWeight: '700' },
+  tagSub: { color: '#6B7280', fontSize: 12, marginTop: 1 },
 
-  statusPill: {
-    backgroundColor: '#E7EBF0',
-    color: '#23303A',
-    fontSize: 12,
-    fontWeight: '700',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-
-  cancelChip: {
+  reqRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    backgroundColor: '#fff',
     paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: Platform.select({ ios: '#FFF1F2', android: '#FFE4E6', default: '#FFE4E6' }),
+    paddingVertical: 10,
+    borderRadius: 12,
+    marginHorizontal: 4,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
   },
-  cancelText: { color: '#991B1B', fontSize: 12, fontWeight: '700' },
+  reqName: { color: '#111827', fontSize: 15, fontWeight: '700' },
+  reqSub: { color: '#6B7280', fontSize: 12, marginTop: 2 },
+
+  actionBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+  },
 });
 
 export default JoinRequestsScreen;

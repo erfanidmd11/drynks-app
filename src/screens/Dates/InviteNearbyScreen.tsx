@@ -7,8 +7,12 @@
 // - Robust notifications insert
 // - Page-0 RPC -> fallback
 // - Normalize rows exactly once before setState (no double mapping)
+// - ✅ Idempotent dual‑write to date_requests + invites
+// - ✅ Realtime sync for invited state (date_requests + invites)
+// - ✅ Origin-aware profile nav hints (preferHeader + afterInviteRoute)
+// - ✅ Seed invited set from DB on mount (so buttons deactivate even if invites came from other screens)
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -221,6 +225,81 @@ const InviteNearbyScreen: React.FC = () => {
   const invitedKey = useMemo(() => `invited_${(dateId ?? 'no_date')}`, [dateId]);
   const [invitedUserIds, setInvitedUserIds] = useState<Set<string>>(new Set());
 
+  // Realtime channels
+  const chDateReqRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const chInvitesRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  const detachRealtime = useCallback(() => {
+    try { chDateReqRef.current?.unsubscribe(); } catch {}
+    try { chInvitesRef.current?.unsubscribe(); } catch {}
+    chDateReqRef.current = null;
+    chInvitesRef.current = null;
+  }, []);
+
+  const attachRealtime = useCallback((viewerId: string, dId: string) => {
+    detachRealtime();
+
+    // date_requests: requester_id = host (viewer), recipient_id = invitee
+    chDateReqRef.current = supabase
+      .channel(`invite_nearby_dr_${dId}_${viewerId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'date_requests', filter: `date_id=eq.${dId}` },
+        (payload: any) => {
+          const row = (payload.new ?? payload.old) as any;
+          if (!row) return;
+          if (row.requester_id !== viewerId) return;
+
+          const rec = row.recipient_id as string | undefined;
+          setInvitedUserIds(prev => {
+            const next = new Set(prev);
+            const status = (payload.new?.status ?? payload.old?.status) as string | undefined;
+
+            if (payload.eventType === 'DELETE' || (status && status !== 'pending')) {
+              if (rec) next.delete(rec);
+            } else if (status === 'pending') {
+              if (rec) next.add(rec);
+            }
+            if (next.size !== prev.size) {
+              AsyncStorage.setItem(invitedKey, JSON.stringify(Array.from(next))).catch(() => {});
+            }
+            return next;
+          });
+        }
+      )
+      .subscribe(() => {});
+
+    // legacy invites: inviter_id = host (viewer), invitee_id = user
+    chInvitesRef.current = supabase
+      .channel(`invite_nearby_legacy_${dId}_${viewerId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'invites', filter: `date_id=eq.${dId}` },
+        (payload: any) => {
+          const row = (payload.new ?? payload.old) as any;
+          if (!row) return;
+          if (row.inviter_id !== viewerId) return;
+
+          const rec = row.invitee_id as string | undefined;
+          setInvitedUserIds(prev => {
+            const next = new Set(prev);
+            const status = (payload.new?.status ?? payload.old?.status) as string | undefined;
+
+            if (payload.eventType === 'DELETE' || (status && status !== 'pending')) {
+              if (rec) next.delete(rec);
+            } else if (status === 'pending') {
+              if (rec) next.add(rec);
+            }
+            if (next.size !== prev.size) {
+              AsyncStorage.setItem(invitedKey, JSON.stringify(Array.from(next))).catch(() => {});
+            }
+            return next;
+          });
+        }
+      )
+      .subscribe(() => {});
+  }, [detachRealtime, invitedKey]);
+
   // ---------- bootstrap ----------
   useEffect(() => {
     (async () => {
@@ -229,6 +308,14 @@ const InviteNearbyScreen: React.FC = () => {
       setLoggedInUser(data?.user ?? null);
     })();
   }, []);
+
+  // attach/detach realtime once we have the essentials
+  useEffect(() => {
+    if (loggedInUser?.id && dateId) {
+      attachRealtime(loggedInUser.id, dateId);
+      return () => detachRealtime();
+    }
+  }, [attachRealtime, detachRealtime, loggedInUser?.id, dateId]);
 
   // Safe defaults: if no orientation is provided, treat as "Everyone"
   const normOrientation = useMemo<string[]>(
@@ -262,14 +349,43 @@ const InviteNearbyScreen: React.FC = () => {
     })();
   }, [invitedKey]);
 
-  // save invited set whenever it changes
-  const persistInvited = useCallback(async (next: Set<string>) => {
+  // ✅ NEW: seed invited set from DB (date_requests + legacy invites) so cards deactivate even when invites came from other screens
+  const seedInvitedFromDB = useCallback(async () => {
+    if (!loggedInUser?.id || !dateId) return;
+
     try {
-      await AsyncStorage.setItem(invitedKey, JSON.stringify(Array.from(next)));
-    } catch {
-      // ignore
+      const [{ data: dr, error: e1 }, { data: inv, error: e2 }] = await Promise.all([
+        supabase
+          .from('date_requests')
+          .select('recipient_id,status')
+          .eq('date_id', dateId)
+          .eq('requester_id', loggedInUser.id)
+          .eq('status', 'pending'),
+        supabase
+          .from('invites')
+          .select('invitee_id,status')
+          .eq('date_id', dateId)
+          .eq('inviter_id', loggedInUser.id)
+          .eq('status', 'pending'),
+      ]);
+
+      if (e1 && __DEV__) console.warn('[InviteNearby] seed: date_requests error', e1.message);
+      if (e2 && __DEV__) console.warn('[InviteNearby] seed: invites error', e2.message);
+
+      const ids = new Set<string>();
+      (dr || []).forEach((r: any) => r?.recipient_id && ids.add(String(r.recipient_id)));
+      (inv || []).forEach((r: any) => r?.invitee_id && ids.add(String(r.invitee_id)));
+
+      setInvitedUserIds(ids);
+      AsyncStorage.setItem(invitedKey, JSON.stringify(Array.from(ids))).catch(() => {});
+    } catch (err) {
+      if (__DEV__) console.warn('[InviteNearby] seedInvitedFromDB failed', err);
     }
-  }, [invitedKey]);
+  }, [loggedInUser?.id, dateId, invitedKey]);
+
+  useEffect(() => {
+    seedInvitedFromDB();
+  }, [seedInvitedFromDB]);
 
   // Reset & fetch when all prerequisites are present
   useEffect(() => {
@@ -462,9 +578,25 @@ const InviteNearbyScreen: React.FC = () => {
     return Math.abs(radiusKm - milesToKm(mi)) < 0.5;
   };
 
-  // origin-aware profile open
+  // origin-aware profile open (with routing hints for header/back + afterInvite return)
   const openProfileFromInvite = (userId: string) => {
-    navigation.navigate('PublicProfile', { userId, origin: 'InviteNearby' });
+    const params = {
+      userId,
+      origin: 'InviteNearby',
+      preferHeader: true,
+      dateId: dateId || null,
+      afterInviteRoute: { tab: 'App', screen: 'My DrYnks', inner: 'MyDates' },
+      returnTo: { name: 'InviteNearby', params: { dateId } },
+    };
+
+    // Prefer your details routes (no "PublicProfile" in your app)
+    try { navigation.navigate('ProfileDetails' as never, params as never); return; } catch {}
+    try { navigation.navigate('ProfileDetailsScreen' as never, params as never); return; } catch {}
+    try { navigation.navigate('Profile' as never, params as never); return; } catch {}
+
+    // Fallback deep link
+    const url = `dr-ynks://profile/${encodeURIComponent(userId)}?origin=InviteNearby`;
+    Linking.openURL(url).catch(() => {});
   };
 
   // ---- Robust notifications insert (handles absence of `type` column)
@@ -510,28 +642,74 @@ const InviteNearbyScreen: React.FC = () => {
     []
   );
 
+  // ✅ Idempotent dual‑write invite (date_requests + legacy invites) + local state + notification
   const inviteUser = useCallback(
     async (recipientId: string, recipientScreenname?: string) => {
       if (!loggedInUser) return;
+      if (!dateId) {
+        Alert.alert('No event selected', 'Please open Invite Nearby from your date to send invites.');
+        return;
+      }
       if (invitedUserIds.has(recipientId)) return;
 
       try {
-        await insertNotification({
-          user_id: recipientId,
-          type: 'invite',
-          title: 'You have a DrYnks invite 🍸',
-          body: 'Open the app to view and respond.',
-          data: {
-            action: 'invite_inapp',
-            date_id: dateId || null,
-            inviter_id: loggedInUser.id,
-          },
-        });
+        // 0) Quick dedupe checks (date_requests + invites)
+        const [{ data: existsDR }, { data: existsLegacy }] = await Promise.all([
+          supabase
+            .from('date_requests')
+            .select('id, status')
+            .eq('date_id', dateId)
+            .eq('requester_id', loggedInUser.id)
+            .eq('recipient_id', recipientId)
+            .limit(1),
+          supabase
+            .from('invites')
+            .select('id, status')
+            .eq('date_id', dateId)
+            .eq('inviter_id', loggedInUser.id)
+            .eq('invitee_id', recipientId)
+            .limit(1),
+        ]);
 
+        const alreadyPendingDR = Array.isArray(existsDR) && existsDR.some(r => r?.status === 'pending');
+        const alreadyPendingLegacy = Array.isArray(existsLegacy) && existsLegacy.some(r => r?.status === 'pending');
+
+        // 1) Insert/ensure NEW flow row
+        if (!alreadyPendingDR) {
+          const { error: drErr } = await supabase
+            .from('date_requests')
+            .insert([{ date_id: dateId, requester_id: loggedInUser.id, recipient_id: recipientId, status: 'pending' }]);
+          if (drErr && drErr.code !== '23505') { // unique violation safe to ignore
+            console.warn('[InviteNearby] date_requests insert error:', drErr.message);
+          }
+        }
+
+        // 2) Mirror to LEGACY (for MySentInvitesScreen)
+        if (!alreadyPendingLegacy) {
+          const { error: invErr } = await supabase
+            .from('invites')
+            .insert([{ date_id: dateId, inviter_id: loggedInUser.id, invitee_id: recipientId, status: 'pending' }]);
+          if (invErr && invErr.code !== '23505') {
+            console.warn('[InviteNearby] invites insert error:', invErr.message);
+          }
+        }
+
+        // 3) Local success (disable button immediately)
         const next = new Set(invitedUserIds);
         next.add(recipientId);
         setInvitedUserIds(next);
-        persistInvited(next);
+        AsyncStorage.setItem(invitedKey, JSON.stringify(Array.from(next))).catch(() => {});
+
+        // 4) In-app notification (robust)
+        try {
+          await insertNotification({
+            user_id: recipientId,
+            type: 'invite',
+            title: 'You have a DrYnks invite 🍸',
+            body: `Open the app to respond.`,
+            data: { action: 'invite_inapp', date_id: dateId, inviter_id: loggedInUser.id },
+          });
+        } catch {}
 
         Alert.alert('Invite sent', recipientScreenname || 'Guest');
       } catch (err: any) {
@@ -539,7 +717,7 @@ const InviteNearbyScreen: React.FC = () => {
         Alert.alert('Invite failed', err?.message || 'Please try again.');
       }
     },
-    [loggedInUser, invitedUserIds, persistInvited, dateId, insertNotification]
+    [loggedInUser, invitedUserIds, invitedKey, dateId, insertNotification]
   );
 
   // ---> NO mapping here. Items are already normalized.

@@ -13,7 +13,11 @@
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "1",
         "EXPO_PUBLIC_SAFE_BOOT": "1",
-        "BRANCH_KEY_TEST": "key_test_ntFhXmyX0fGFgunpqgifWdppvCe1vGUn"
+
+        "EXPO_PUBLIC_USE_EXPO_GO": "0",
+        "EXPO_PUBLIC_DISABLE_BRANCH": "0",
+
+        "BRANCH_USE_TEST": "1"
       }
     },
 
@@ -24,7 +28,12 @@
       "env": {
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "1",
-        "EXPO_PUBLIC_SAFE_BOOT": "1"
+        "EXPO_PUBLIC_SAFE_BOOT": "1",
+
+        "EXPO_PUBLIC_USE_EXPO_GO": "0",
+        "EXPO_PUBLIC_DISABLE_BRANCH": "0",
+
+        "BRANCH_USE_TEST": "1"
       }
     },
 
@@ -35,9 +44,7 @@
 
       "ios": {
         "resourceClass": "m-medium"
-        
       },
-
       "android": {
         "gradleCommand": ":app:bundleRelease"
       },
@@ -46,7 +53,11 @@
         "EXPO_PUBLIC_DISABLE_BIOMETRICS": "1",
         "EXPO_PUBLIC_DISABLE_PUSH": "0",
         "EXPO_PUBLIC_SAFE_BOOT": "1",
-        "BRANCH_KEY_LIVE": "key_live_fsti9bA18fJFfDdahY3FJoblqwo0EHF1"
+
+        "EXPO_PUBLIC_USE_EXPO_GO": "0",
+        "EXPO_PUBLIC_DISABLE_BRANCH": "0",
+
+        "BRANCH_USE_TEST": "0"
       }
     }
   },

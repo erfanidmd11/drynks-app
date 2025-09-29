@@ -1,19 +1,15 @@
 // src/screens/Dates/MySentInvitesScreen.tsx
-// My Sent Invites — production-ready (dual-backend support)
-// - NEW flow: v_sent_invites + updates to public.date_requests (requester=host)
-// - LEGACY flow: public.invites (pending) with revoke via status='revoked'
-// - DateTag row (title + friendly date + location) above each ProfileCard
-// - Swipe RIGHT to rescind (no inline buttons)
-// - Source of truth for date info: date_requests (fallback: dates)
-// - Realtime: self (date_requests + invites), affected dates, and invites-on-those-dates
-// - Robust 'full' detection and end-of-day expiry in event timezone
-// - Polished empty state
+// My Sent Invites — RN 0.81 safe, dual-backend, status-robust.
+// - NEW flow (preferred): v_sent_invites (filtered by me), joins data from date_requests
+// - LEGACY flow: public.invites (status in ['pending','sent','invited'])
+// - DateTag above each ProfileCard
+// - Realtime on my invites + affected date rows
+// - No RNGH/Reanimated usage (avoids findHostInstance_DEPRECATED crash)
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Dimensions,
   RefreshControl,
   StyleSheet,
   Text,
@@ -25,14 +21,7 @@ import {
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, {
-  FadeInUp,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
 
 import { supabase } from '@config/supabase';
 import AppShell from '@components/AppShell';
@@ -41,12 +30,13 @@ import { notifyInviteRevoked } from '@services/NotificationService';
 
 type UUID = string;
 
-const DRYNKS_RED   = '#E34E5C';
-const DRYNKS_BLUE  = '#232F39';
-const DRYNKS_TEXT  = '#2B2B2B';
-const SCREEN_W = Dimensions.get('window').width;
+const DRYNKS_RED  = '#E34E5C';
+const DRYNKS_BLUE = '#232F39';
+const DRYNKS_TEXT = '#2B2B2B';
 
-/* ------------------------------ helpers ------------------------------ */
+const SHOWABLE_STATUSES = new Set(['pending', 'sent', 'invited']); // <- key fix
+
+/* -------------------------------- helpers -------------------------------- */
 
 const looksLikeWKTOrHex = (s?: string | null) =>
   !!s && (/^SRID=/i.test(s) || /^[0-9A-F]{16,}$/i.test(String(s)));
@@ -125,8 +115,10 @@ type ViewSentRow = {
   date_id: UUID;
   recipient_id: UUID;
   created_at: string;
-  status?: string | null;         // if present, we filter to 'pending'
-  // Optional convenience columns (may or may not exist):
+  status?: string | null;
+  inviter_id?: UUID | null; // some views expose this
+  host_id?: UUID | null;    // some views expose this
+  // Optional convenience columns:
   title?: string | null;
   event_date?: string | null;
   event_timezone?: string | null;
@@ -138,7 +130,7 @@ type InviteRow = {
   date_id: UUID;
   inviter_id: UUID;
   invitee_id: UUID;
-  status: 'pending' | 'accepted' | 'revoked' | 'dismissed';
+  status: string; // tolerate non-pending values
   created_at: string;
 };
 
@@ -213,83 +205,37 @@ type SentItem = {
   expired: boolean;
 };
 
-/* ---------------------------- Row component ---------------------------- */
+/* ----------------------- small presentational bits ----------------------- */
 
-type SentRowProps = {
-  index: number;
-  item: SentItem;
-  onRescind: (row: SentItem) => void;
-  onOpenProfile: (userId: string) => void;
+const DateTag: React.FC<{ title: string | null; event_date: string | null; tz: string | null; location: string | null; photo: string | null; disabled?: boolean }> = ({ title, event_date, tz, location, photo, disabled }) => {
+  const day = formatEventDay(event_date, tz);
+  return (
+    <View style={[styles.dateTag, disabled && { opacity: 0.55 }]}>
+      {photo ? (
+        <Image source={{ uri: photo }} style={styles.dateTagAvatar} />
+      ) : (
+        <View style={[styles.dateTagAvatar, styles.dateTagPlaceholder]}>
+          <Text style={styles.dateTagEmoji}>🍸</Text>
+        </View>
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={styles.dateTagTitle} numberOfLines={1}>
+          {title || 'Untitled date'}
+        </Text>
+        <Text style={styles.dateTagSub} numberOfLines={1}>
+          {day ? `${day}` : 'Upcoming'}{location ? ` · ${location}` : ''}
+        </Text>
+      </View>
+    </View>
+  );
 };
 
-const SentRow = React.memo<SentRowProps>(({ index, item, onRescind, onOpenProfile }) => {
-  const tx = useSharedValue(0);
-  const threshold = Math.min(140, SCREEN_W * 0.33);
-
-  const pan = Gesture.Pan()
-    .activeOffsetX([-16, 16])
-    .failOffsetY([-12, 12])
-    .onStart(() => { tx.value = 0; })
-    .onUpdate((e) => { tx.value = e.translationX; })
-    .onEnd((e) => {
-      if (e.translationX > threshold) {
-        tx.value = withSpring(SCREEN_W, {}, () => runOnJS(onRescind)(item));
-      } else {
-        tx.value = withSpring(0);
-      }
-    });
-
-  const cardStyle = useAnimatedStyle(() => ({ transform: [{ translateX: tx.value }] }));
-  const bgStyle = useAnimatedStyle(() => ({
-    backgroundColor: tx.value > 0 ? 'rgba(46,204,113,0.12)' : 'transparent',
-  }));
-
-  const disabled = item.expired || item.full;
-  const day = formatEventDay(item.event_date, item.event_timezone);
-
-  return (
-    <GestureDetector gesture={pan}>
-      <Animated.View entering={FadeInUp.delay(index * 50).duration(300)} style={[styles.rowWrap, bgStyle]}>
-        <Animated.View style={cardStyle}>
-          <View style={styles.cardWrap}>
-            {/* --- DateTag row (association to the date) --- */}
-            <View style={[styles.dateTag, disabled && { opacity: 0.55 }]}>
-              {item.date_photo_url ? (
-                <Image source={{ uri: item.date_photo_url }} style={styles.dateTagAvatar} />
-              ) : (
-                <View style={[styles.dateTagAvatar, styles.dateTagPlaceholder]}>
-                  <Text style={styles.dateTagEmoji}>🍸</Text>
-                </View>
-              )}
-
-              <View style={{ flex: 1 }}>
-                <Text style={styles.dateTagTitle} numberOfLines={1}>
-                  {item.date_title || 'Untitled date'}
-                </Text>
-                <Text style={styles.dateTagSub} numberOfLines={1}>
-                  {day ? `${day}` : 'Upcoming'}
-                  {item.date_location ? ` · ${item.date_location}` : ''}
-                </Text>
-              </View>
-            </View>
-
-            {/* --- Invitee Profile --- */}
-            <ProfileCard
-              user={item.user}
-              compact
-              origin="MySentInvites"
-              invited
-              onInvite={() => { /* swipe to rescind instead */ }}
-              onPressProfile={() => onOpenProfile(item.user.id)}
-              onNamePress={() => onOpenProfile(item.user.id)}
-              onAvatarPress={() => onOpenProfile(item.user.id)}
-            />
-          </View>
-        </Animated.View>
-      </Animated.View>
-    </GestureDetector>
-  );
-});
+const RescindButton: React.FC<{ onPress: () => void }> = ({ onPress }) => (
+  <TouchableOpacity onPress={onPress} style={styles.rescindBtn} accessibilityRole="button" accessibilityLabel="Rescind invite">
+    <Ionicons name="arrow-undo-outline" size={16} color="#166534" />
+    <Text style={styles.rescindText}>Rescind</Text>
+  </TouchableOpacity>
+);
 
 /* ------------------------------- Screen ------------------------------- */
 
@@ -306,8 +252,7 @@ const MySentInvitesScreen: React.FC = () => {
 
   // realtime channels
   const chInvitesSelfRef   = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const chDrSelfRef        = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const chDateReqRef       = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const chDatesRef         = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const chInvitesDatesRef  = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // session
@@ -326,8 +271,8 @@ const MySentInvitesScreen: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const seen = await AsyncStorage.getItem('hint_my_sent_invites_v7');
-        if (!seen) await AsyncStorage.setItem('hint_my_sent_invites_v7', 'true');
+        const seen = await AsyncStorage.getItem('hint_my_sent_invites_v8');
+        if (!seen) await AsyncStorage.setItem('hint_my_sent_invites_v8', 'true');
       } catch {}
     })();
   }, []);
@@ -406,15 +351,26 @@ const MySentInvitesScreen: React.FC = () => {
   /* ------------------ detect + query (view or legacy) ------------------ */
 
   const fetchSentCore = useCallback(async (hostId: UUID) => {
-    // Try new view first
+    // Try new view first (filter by inviter_id or host_id depending on schema)
     try {
-      const { data, error } = await supabase
-        .from('v_sent_invites')
-        .select('*')
-        .order('created_at', { ascending: false });
+      // Attempt with inviter_id
+      let q = supabase.from('v_sent_invites').select('*').eq('inviter_id', hostId).order('created_at', { ascending: false });
+      let { data, error } = await q;
+      if (error?.message?.toLowerCase?.().includes('column') || error?.message?.toLowerCase?.().includes('inviter_id')) {
+        // Try fallback column host_id if view uses that name
+        ({ data, error } = await supabase
+          .from('v_sent_invites')
+          .select('*')
+          .eq('host_id', hostId)
+          .order('created_at', { ascending: false }));
+      }
+
       if (!error && Array.isArray(data)) {
-        const rows = (data as ViewSentRow[])
-          .filter(r => !r.status || r.status === 'pending'); // if status exists, keep only pending
+        const rows = (data as ViewSentRow[]).filter((r) => {
+          const s = String(r.status ?? 'pending').toLowerCase();
+          return SHOWABLE_STATUSES.has(s);
+        });
+
         if (rows.length) {
           return {
             kind: 'view' as const,
@@ -423,7 +379,6 @@ const MySentInvitesScreen: React.FC = () => {
               date_id: r.date_id,
               recipient_id: r.recipient_id,
               created_at: r.created_at,
-              // pass-through optional fields if present (used later only as hints)
               _title: r.title ?? null,
               _event_date: r.event_date ?? null,
               _event_tz: r.event_timezone ?? null,
@@ -433,12 +388,12 @@ const MySentInvitesScreen: React.FC = () => {
       }
     } catch { /* ignore and fall back */ }
 
-    // Legacy: invites I sent and still pending
+    // Legacy: invites I sent and still showable
     const { data, error } = await supabase
       .from('invites')
       .select('id, date_id, inviter_id, invitee_id, status, created_at')
       .eq('inviter_id', hostId)
-      .eq('status', 'pending')
+      .in('status', Array.from(SHOWABLE_STATUSES))
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -456,6 +411,15 @@ const MySentInvitesScreen: React.FC = () => {
 
   /* ----------------------------- main fetch ---------------------------- */
 
+  const detachRealtime = useCallback(() => {
+    try { chInvitesSelfRef.current?.unsubscribe(); } catch {}
+    try { chDatesRef.current?.unsubscribe(); } catch {}
+    try { chInvitesDatesRef.current?.unsubscribe(); } catch {}
+    chInvitesSelfRef.current = null;
+    chDatesRef.current = null;
+    chInvitesDatesRef.current = null;
+  }, []);
+
   const fetchRows = useCallback(async () => {
     if (!me) { setRows([]); setLoading(false); setRefreshing(false); return; }
     if (!refreshing) setLoading(true);
@@ -469,16 +433,15 @@ const MySentInvitesScreen: React.FC = () => {
 
     const pending = core.pending;
     if (!pending.length) {
-      setRows([]); setLoading(false); setRefreshing(false);
+      setRows([]);
+      setLoading(false); setRefreshing(false);
       detachRealtime();
-      // still attach base watchers so new rows show up without manual refresh
-      attachDrSelfRealtime(me);
-      attachInvitesSelfRealtime(me);
+      attachInvitesSelfRealtime(me); // still listen so new rows show up
       return;
     }
 
-    const dateIds     = Array.from(new Set(pending.map((r) => r.date_id)));
-    const recipientIds= Array.from(new Set(pending.map((r) => r.recipient_id)));
+    const dateIds      = Array.from(new Set(pending.map((r) => r.date_id)));
+    const recipientIds = Array.from(new Set(pending.map((r) => r.recipient_id)));
 
     const [eventMap, profileMap, acceptedCounts] = await Promise.all([
       fetchDateRequestsMap(dateIds),
@@ -557,7 +520,9 @@ const MySentInvitesScreen: React.FC = () => {
         full,
         expired,
       } as SentItem;
-    }).filter((it) => !it.full && !it.expired);
+    })
+    // only show invites that are still relevant
+    .filter((it) => !it.full && !it.expired);
 
     // Sort newest first (created_at desc)
     cleaned.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -567,8 +532,7 @@ const MySentInvitesScreen: React.FC = () => {
     setRefreshing(false);
 
     // realtime watchers
-    attachDrSelfRealtime(me);          // new flow: my date_requests rows (requester=me)
-    attachInvitesSelfRealtime(me);     // legacy flow: my invites rows (inviter=me)
+    attachInvitesSelfRealtime(me);     // legacy & some views source invites here
     attachDateRequestsRealtime(dateIds);
     attachInvitesForDatesRealtime(dateIds);
   }, [
@@ -578,6 +542,7 @@ const MySentInvitesScreen: React.FC = () => {
     fetchDateRequestsMap,
     fetchProfilesMap,
     fetchAcceptedCounts,
+    detachRealtime,
   ]);
 
   const onRefresh = useCallback(() => {
@@ -599,27 +564,20 @@ const MySentInvitesScreen: React.FC = () => {
       .subscribe(() => {});
   }, [fetchRows]);
 
-  const attachDrSelfRealtime = useCallback((viewer: string) => {
-    try { chDrSelfRef.current?.unsubscribe(); } catch {}
-    chDrSelfRef.current = supabase
-      .channel('my_sent_invites_self_dr_rx')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'date_requests', filter: `requester_id=eq.${viewer}` },
-        () => { fetchRows(); }
-      )
-      .subscribe(() => {});
-  }, [fetchRows]);
-
   const attachDateRequestsRealtime = useCallback((ids: UUID[]) => {
-    try { chDateReqRef.current?.unsubscribe(); } catch {}
-    if (!ids.length) { chDateReqRef.current = null; return; }
+    try { chDatesRef.current?.unsubscribe(); } catch {}
+    if (!ids.length) { chDatesRef.current = null; return; }
     const idList = ids.join(',');
-    chDateReqRef.current = supabase
+    chDatesRef.current = supabase
       .channel('my_sent_invites_date_requests_rx')
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'date_requests', filter: `id=in.(${idList})` },
+        () => { fetchRows(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'date_requests', filter: `id=in.(${idList})` },
         () => { fetchRows(); }
       )
       .subscribe(() => {});
@@ -636,19 +594,13 @@ const MySentInvitesScreen: React.FC = () => {
         { event: 'UPDATE', schema: 'public', table: 'invites', filter: `date_id=in.(${idList})` },
         () => { fetchRows(); }
       )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'invites', filter: `date_id=in.(${idList})` },
+        () => { fetchRows(); }
+      )
       .subscribe(() => {});
   }, [fetchRows]);
-
-  const detachRealtime = useCallback(() => {
-    try { chInvitesSelfRef.current?.unsubscribe(); } catch {}
-    try { chDrSelfRef.current?.unsubscribe(); } catch {}
-    try { chDateReqRef.current?.unsubscribe(); } catch {}
-    try { chInvitesDatesRef.current?.unsubscribe(); } catch {}
-    chInvitesSelfRef.current = null;
-    chDrSelfRef.current = null;
-    chDateReqRef.current = null;
-    chInvitesDatesRef.current = null;
-  }, []);
 
   // first mount + focus refresh
   useEffect(() => {
@@ -691,44 +643,30 @@ const MySentInvitesScreen: React.FC = () => {
   /* -------------------------------- actions -------------------------------- */
 
   const rescindInvite = useCallback(async (row: SentItem) => {
-    // Try NEW flow first: cancel the request in date_requests (requester = me/host)
+    // Newer stack: invites are the source of truth for "sent" items.
+    // We mark the invite as revoked; if your DB uses a stored procedure, call it here instead.
     try {
-      const { error, data } = await supabase
-        .from('date_requests')
-        .update({ status: 'cancelled' })
-        .eq('id', row.req_id)
-        .select('id')
-        .single();
-      if (!error && data) {
-        setRows((prev) => prev.filter((r) => r.req_id !== row.req_id));
-        try {
-          await notifyInviteRevoked({
-            recipientId: row.recipient_id,
-            dateId: row.date_id,
-            eventTitle: row.date_title || 'your date',
-          });
-        } catch {}
-        return;
-      }
-    } catch { /* fall back to legacy */ }
-
-    // Legacy revoke
-    try {
-      const { error } = await supabase.from('invites').update({ status: 'revoked' }).eq('id', row.req_id);
+      const { error } = await supabase
+        .from('invites')
+        .update({ status: 'revoked' })
+        .eq('id', row.req_id);
       if (error) throw error;
 
+      // Optimistic remove
+      setRows((prev) => prev.filter((r) => r.req_id !== row.req_id));
+
+      // Notify invitee (bell/push if configured)
       try {
         await notifyInviteRevoked({
           recipientId: row.recipient_id,
           dateId: row.date_id,
-          eventTitle: row.date_title || 'your date',
+          eventTitle: row.date_title ?? 'your invite',
         });
-      } catch { /* non-fatal */ }
+      } catch {}
 
-      setRows((prev) => prev.filter((r) => r.req_id !== row.req_id));
     } catch (e: any) {
       console.error('[MySentInvites] revoke error', e);
-      Alert.alert('Could not cancel invite', e?.message || 'Try again later.');
+      Alert.alert('Could not rescind invite', e?.message || 'Try again later.');
     }
   }, []);
 
@@ -736,7 +674,7 @@ const MySentInvitesScreen: React.FC = () => {
 
   if (loading) {
     return (
-     <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks"> 
+     <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
         <View style={styles.centered}><ActivityIndicator /></View>
       </AppShell>
     );
@@ -782,23 +720,46 @@ const MySentInvitesScreen: React.FC = () => {
         contentContainerStyle={{ padding: 16, paddingBottom: 24, paddingTop: 4 }}
         ListHeaderComponent={
           <View style={styles.instructions}>
-            <Text style={styles.instructionsText}>
-              Swipe <Text style={{ fontWeight: '800' }}>right</Text> to rescind an invite
-            </Text>
+            <Text style={styles.instructionsText}>Tap <Text style={{ fontWeight: '800' }}>Rescind</Text> on a card to cancel that invite</Text>
           </View>
         }
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         initialNumToRender={6}
         windowSize={10}
         removeClippedSubviews
-        renderItem={({ item, index }) => (
-          <SentRow
-            index={index}
-            item={item}
-            onRescind={rescindInvite}
-            onOpenProfile={openProfile}
-          />
-        )}
+        renderItem={({ item }) => {
+          const disabled = item.expired || item.full;
+          return (
+            <View style={styles.rowWrap}>
+              <View style={styles.cardWrap}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <View style={{ flex: 1 }}>
+                    <DateTag
+                      title={item.date_title}
+                      event_date={item.event_date}
+                      tz={item.event_timezone}
+                      location={item.date_location}
+                      photo={item.date_photo_url}
+                      disabled={disabled}
+                    />
+                  </View>
+                  <RescindButton onPress={() => rescindInvite(item)} />
+                </View>
+
+                <ProfileCard
+                  user={item.user}
+                  compact
+                  origin="MySentInvites"
+                  invited
+                  onInvite={() => {}}
+                  onPressProfile={() => openProfile(item.user.id)}
+                  onNamePress={() => openProfile(item.user.id)}
+                  onAvatarPress={() => openProfile(item.user.id)}
+                />
+              </View>
+            </View>
+          );
+        }}
       />
     </AppShell>
   );
@@ -847,6 +808,18 @@ const styles = StyleSheet.create({
   dateTagEmoji: { fontSize: 16 },
   dateTagTitle: { color: DRYNKS_TEXT, fontWeight: '700' },
   dateTagSub: { color: '#6B7280', fontSize: 12, marginTop: 1 },
+
+  rescindBtn: {
+    marginRight: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#DCFCE7',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  rescindText: { color: '#166534', fontSize: 12, fontWeight: '700' },
 });
 
 export default MySentInvitesScreen;

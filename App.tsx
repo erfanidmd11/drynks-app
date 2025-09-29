@@ -7,7 +7,7 @@ import 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 // 3) iOS18 & legacy libs guard (loads after core RN, still early)
-import './src/shims/fixNativeEventEmitterAssign';
+// ❌ removed: import './src/shims/fixNativeEventEmitterAssign';
 import './src/boot/SafeEmitterShim';
 import { unlockEmitters } from './src/boot/SafeEmitterShim';
 import { ensureValidSupabaseSessionOnce } from './src/boot/ensureValidSupabaseSession';
@@ -17,8 +17,8 @@ import 'react-native-url-polyfill/auto';
 import 'react-native-get-random-values';
 import './src/boot/polyfills';
 import { decode as atobPolyfill, encode as btoaPolyfill } from 'base-64';
-if (typeof (global as any).atob === 'undefined') (global as any).atob = atobPolyfill;
-if (typeof (global as any).btoa === 'undefined') (global as any).btoa = btoaPolyfill;
+if (typeof (globalThis as any).atob === 'undefined') (globalThis as any).atob = atobPolyfill;
+if (typeof (globalThis as any).btoa === 'undefined') (globalThis as any).btoa = btoaPolyfill;
 
 import React, { useEffect, useRef } from 'react';
 import {
@@ -160,6 +160,12 @@ function BreadcrumbLogger() {
 export default function App() {
   const listenersAttachedRef = useRef(false);
 
+  // ✅ Unlock the SafeEmitter shim after the first frame (fixes iOS 18 cold‑start emitter issues)
+  useEffect(() => {
+    const id = requestAnimationFrame(() => unlockEmitters());
+    return () => cancelAnimationFrame(id);
+  }, []);
+
   // Validate session once at boot (prevents stale refresh-token error spam)
   useEffect(() => {
     void ensureValidSupabaseSessionOnce();
@@ -175,37 +181,6 @@ export default function App() {
     };
   }, []);
 
-  // Unlock SafeEmitter shim after app is active & interactions flushed
-  useEffect(() => {
-    let cancelled = false;
-    const unlockWhenReady = async () => {
-      if (AppState.currentState !== 'active') {
-        await new Promise<void>((resolve) => {
-          const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
-            if (s === 'active') {
-              try {
-                sub.remove();
-              } catch {}
-              resolve();
-            }
-          });
-        });
-      }
-      await new Promise<void>((resolve) =>
-        InteractionManager.runAfterInteractions(() => resolve())
-      );
-      if (!cancelled) {
-        try {
-          unlockEmitters();
-        } catch {}
-      }
-    };
-    void unlockWhenReady();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   // Supabase token auto-refresh lifecycle
   useEffect(() => {
     supabase.auth.startAutoRefresh?.();
@@ -216,7 +191,7 @@ export default function App() {
     };
   }, []);
 
-  // Optional: quick-unlock refresh rotation hook if present
+  // Optional: quick-unlock rotation hook if present
   useEffect(() => {
     let off: undefined | (() => void);
     try {

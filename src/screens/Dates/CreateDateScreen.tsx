@@ -1,10 +1,8 @@
 // src/screens/CreateDateScreen.tsx
-// Production-ready create date flow
-// - iOS inline calendar; Android calendar dialog
-// - City input is single-line, full width; "Choose My Current Location" is on its own line
-// - Autocomplete after 3 chars with sessiontoken + robust fallback chain (cities → regions → general → findplace → geocode)
-// - DEV-only console diagnostics for Google status/error_message
-// - Insert-first, then update photos; strong placeholders; clears form after success
+// Production-ready create date flow (Expo SDK 54/55 compatible)
+// - No expo-file-system usage (avoids deprecated readAsStringAsync)
+// - Manipulator returns base64, we upload that directly to Supabase
+// - Same UI/behavior as before
 
 import 'react-native-get-random-values';
 import React, { useCallback, useRef, useState } from 'react';
@@ -27,7 +25,6 @@ import { supabase } from '@config/supabase';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import { v4 as uuidv4 } from 'uuid';
 import Animated, { FadeIn, FadeInUp, ZoomIn } from 'react-native-reanimated';
@@ -68,24 +65,18 @@ const MEDIA_IMAGES =
   ImagePicker.MediaTypeOptions.Images;
 
 function base64ToUint8Array(b64: string): Uint8Array {
-  const bin = typeof (globalThis as any).atob === 'function' ? (globalThis as any).atob(b64) : atob(b64);
+  const bin =
+    typeof (globalThis as any).atob === 'function'
+      ? (globalThis as any).atob(b64)
+      : atob(b64);
   const len = bin.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
 }
 
-async function uploadToDateBucket(localUri: string, userId: string) {
-  const manipulated = await ImageManipulator.manipulateAsync(
-    localUri,
-    [{ resize: { width: 1080 } }],
-    { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
-  );
-
+async function uploadToDateBucketFromBase64(base64: string, userId: string) {
   const path = `${userId}/${uuidv4()}.jpg`;
-  const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
-    encoding: 'base64',
-  });
   const bytes = base64ToUint8Array(base64);
 
   const { data, error } = await supabase.storage
@@ -113,7 +104,8 @@ const MIN_QUERY_LEN = 3;
 function isCityPrediction(p: any): boolean {
   const t: string[] = Array.isArray(p?.types) ? p.types : [];
   if (t.includes('locality')) return true;
-  if (t.includes('administrative_area_level_3') || t.includes('administrative_area_level_2')) return true;
+  if (t.includes('administrative_area_level_3') || t.includes('administrative_area_level_2'))
+    return true;
   const desc: string = String(p?.description || '');
   const commas = desc.split(',').length - 1;
   return commas >= 1 && !t.includes('establishment');
@@ -160,8 +152,12 @@ const LocationAutocomplete: React.FC<{
     debounceRef.current = setTimeout(async () => {
       const sessiontoken = sessionRef.current;
       const components =
-        PLACES_COUNTRIES.length > 0 ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
-      const common = `input=${encodeURIComponent(query)}&language=en&key=${GOOGLE_KEY}&sessiontoken=${sessiontoken}&locationbias=ipbias${components}`;
+        PLACES_COUNTRIES.length > 0
+          ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}`
+          : '';
+      const common = `input=${encodeURIComponent(
+        query
+      )}&language=en&key=${GOOGLE_KEY}&sessiontoken=${sessiontoken}&locationbias=ipbias${components}`;
 
       try {
         setLoading(true);
@@ -176,20 +172,26 @@ const LocationAutocomplete: React.FC<{
         }
 
         if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
-          const items = json.predictions.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          const items = json.predictions.map((p: any) => ({
+            place_id: p.place_id,
+            description: p.description,
+          }));
           setSuggestions(items);
           setOpen(items.length > 0);
           return;
         }
 
-        // A2) Regions (some accounts return better city-like hits here)
+        // A2) Regions
         url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}&types=(regions)`;
         res = await fetch(url);
         json = await res.json();
 
         if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
           const filtered = json.predictions.filter(isCityPrediction);
-          const items = filtered.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          const items = filtered.map((p: any) => ({
+            place_id: p.place_id,
+            description: p.description,
+          }));
           if (items.length) {
             setSuggestions(items);
             setOpen(true);
@@ -208,7 +210,10 @@ const LocationAutocomplete: React.FC<{
 
         if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
           const filtered = json.predictions.filter(isCityPrediction);
-          const items = filtered.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          const items = filtered.map((p: any) => ({
+            place_id: p.place_id,
+            description: p.description,
+          }));
           if (items.length > 0) {
             setSuggestions(items);
             setOpen(true);
@@ -216,7 +221,7 @@ const LocationAutocomplete: React.FC<{
           }
         }
 
-        // C) Find Place from Text (textquery)
+        // C) Find Place from Text
         url =
           `https://maps.googleapis.com/maps/api/place/findplacefromtext/json` +
           `?input=${encodeURIComponent(query)}` +
@@ -241,7 +246,7 @@ const LocationAutocomplete: React.FC<{
           return;
         }
 
-        // D) Geocode fallback (use as a single suggestion)
+        // D) Geocode fallback
         url =
           `https://maps.googleapis.com/maps/api/geocode/json` +
           `?address=${encodeURIComponent(query)}` +
@@ -258,14 +263,12 @@ const LocationAutocomplete: React.FC<{
           const label = labelFromAddressComponents(r);
           const loc = r.geometry?.location;
           if (label && loc?.lat != null && loc?.lng != null) {
-            // "geo:" pseudo ID so we can select directly without details call
             setSuggestions([{ place_id: `geo:${loc.lat},${loc.lng}`, description: label }]);
             setOpen(true);
             return;
           }
         }
 
-        // Nothing worked
         setSuggestions([]);
         setOpen(false);
       } catch (e) {
@@ -283,7 +286,6 @@ const LocationAutocomplete: React.FC<{
   }, [value, canAutocomplete]);
 
   const selectFromGeoPseudo = (place_id: string) => {
-    // place_id format: "geo:lat,lng"
     const coords = place_id.replace('geo:', '').split(',');
     const lat = parseFloat(coords[0]);
     const lng = parseFloat(coords[1]);
@@ -512,11 +514,15 @@ const CreateDateScreen: React.FC = () => {
 
   // Form state
   const [title, setTitle] = useState('');
-  const [locationName, setLocationName] = useState(''); // ✅ fixed syntax
+  const [locationName, setLocationName] = useState('');
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const [date, setDate] = useState(new Date());
+
+  // Photo state (uri for preview + base64 for upload)
   const [photo, setPhoto] = useState<string | null>(null);
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null);
   const [uploadedPath, setUploadedPath] = useState<string | null>(null);
+
   const [whoPays, setWhoPays] = useState<'I am paying' | '50/50' | 'Looking for sponsor'>('50/50');
   const [maxAttendees, setMaxAttendees] = useState('');
   const [genderPrefs, setGenderPrefs] = useState<Record<'Male' | 'Female' | 'TS', string>>({
@@ -524,7 +530,9 @@ const CreateDateScreen: React.FC = () => {
     Female: '',
     TS: '',
   });
-  const [orientationPref, setOrientationPref] = useState<'Straight' | 'Gay/Lesbian' | 'Bisexual' | 'Pansexual' | 'Everyone'>('Straight');
+  const [orientationPref, setOrientationPref] = useState<
+    'Straight' | 'Gay/Lesbian' | 'Bisexual' | 'Pansexual' | 'Everyone'
+  >('Straight');
   const [eventType, setEventType] = useState<'date' | 'hangout' | 'activity'>('date');
   const [loading, setLoading] = useState(false);
 
@@ -568,12 +576,14 @@ const CreateDateScreen: React.FC = () => {
           await supabase.storage.from(DATE_BUCKET).remove([uploadedPath]).catch(() => {});
           setUploadedPath(null);
         }
+        // Create a web-sized preview & base64 for upload in one step
         const manipulated = await ImageManipulator.manipulateAsync(
           result.assets[0].uri,
           [{ resize: { width: 1080 } }],
-          { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
+          { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG, base64: true }
         );
         setPhoto(manipulated.uri);
+        setPhotoBase64(manipulated.base64 || null);
       }
     } catch {
       Alert.alert('Error', 'Could not open your photo library.');
@@ -584,9 +594,11 @@ const CreateDateScreen: React.FC = () => {
     try {
       if (uploadedPath) await supabase.storage.from(DATE_BUCKET).remove([uploadedPath]).catch(() => {});
       setPhoto(null);
+      setPhotoBase64(null);
       setUploadedPath(null);
     } catch {
       setPhoto(null);
+      setPhotoBase64(null);
       setUploadedPath(null);
     }
   };
@@ -597,6 +609,7 @@ const CreateDateScreen: React.FC = () => {
     setCoords(null);
     setDate(new Date());
     setPhoto(null);
+    setPhotoBase64(null);
     setUploadedPath(null);
     setWhoPays('50/50');
     setMaxAttendees('');
@@ -624,7 +637,10 @@ const CreateDateScreen: React.FC = () => {
     if (totalGenders === 0 || totalGenders > totalSpots - 1) {
       Alert.alert(
         'Gender Selection Required',
-        `Please specify how many of each gender you're inviting (excluding yourself). Max allowed: ${Math.max(totalSpots - 1, 0)}`
+        `Please specify how many of each gender you're inviting (excluding yourself). Max allowed: ${Math.max(
+          totalSpots - 1,
+          0
+        )}`
       );
       return;
     }
@@ -701,8 +717,8 @@ const CreateDateScreen: React.FC = () => {
       const dateId: string = inserted.id;
 
       // 2) Upload photo (if any), then update row
-      if (photo) {
-        const { publicUrl, path } = await uploadToDateBucket(photo, userId);
+      if (photo && photoBase64) {
+        const { publicUrl, path } = await uploadToDateBucketFromBase64(photoBase64, userId);
         setUploadedPath(path);
 
         const { error: updateErr } = await supabase
@@ -801,7 +817,6 @@ const CreateDateScreen: React.FC = () => {
                     if (selected) setDate(selected);
                   }}
                   style={{ alignSelf: 'stretch' }}
-                  // ----- iOS color/readability fixes -----
                   // @ts-ignore
                   themeVariant="light"
                   // @ts-ignore

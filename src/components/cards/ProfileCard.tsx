@@ -1,7 +1,10 @@
-// Production-ready: scrollable gallery + bottom dots + full screenname
-// + origin-aware profile nav + "Invited" disabled state.
+// Production-ready: Inviteable Profile Card
+// - Scrollable gallery + bottom dots + full screenname
+// - Origin-aware profile navigation
+// - Built-in, idempotent invite handler (new flow: date_requests; legacy fallback: invites)
+// - Auto-hydrates "Invited" state; disables CTA when already invited
 
-import React, { useMemo, useRef, useState, useCallback } from 'react';
+import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -15,8 +18,10 @@ import {
   NativeSyntheticEvent,
   Linking,
   Platform,
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { supabase } from '@config/supabase';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const GOLDEN_RATIO = 1.618;
@@ -38,13 +43,26 @@ type Props = {
   user: ProfileUser;
   compact?: boolean;
   origin?: string;
+
+  /** If you already know this invite is sent, pass true to lock the CTA. */
   invited?: boolean;
+
+  /** If supplied, we call this instead of the built-in invite logic. */
   onInvite?: () => void;
 
+  /** Required for built-in invite logic (date to invite TO). */
+  dateId?: string;
+
+  /** Optional; built-in logic will read from supabase.auth if omitted. */
+  meId?: string;
+
+  // Optional navigation overrides:
   onPressProfile?: () => void;
   onNamePress?: () => void;
-  onAvatarPress?: () => void;
+  onAvatarPress?: () => void; // (kept for parity, unused here)
 };
+
+/* ----------------------------- small utilities ---------------------------- */
 
 const calculateAge = (dob?: string | null): number | null => {
   if (!dob) return null;
@@ -71,20 +89,12 @@ function normalizePhotos(user: ProfileUser): string[] {
 
   const g = user?.gallery_photos;
   if (Array.isArray(g)) {
-    for (const entry of g) {
-      const u = toUrl(entry);
-      if (u) out.push(u);
-    }
+    for (const entry of g) add(toUrl(entry));
   } else if (typeof g === 'string') {
     try {
       if (/^\s*\[/.test(g)) {
         const arr = JSON.parse(g);
-        if (Array.isArray(arr)) {
-          for (const entry of arr) {
-            const u = toUrl(entry);
-            if (u) out.push(u);
-          }
-        }
+        if (Array.isArray(arr)) for (const entry of arr) add(toUrl(entry));
       } else if (/^https?:\/\//i.test(g)) {
         out.push(g);
       }
@@ -94,18 +104,22 @@ function normalizePhotos(user: ProfileUser): string[] {
   }
 
   const seen = new Set<string>();
-  return out.filter((u) => (seen.has(u) ? false : (seen.add(u), true)));
+  return out.filter((u) => (u ? (!seen.has(u) && (seen.add(u), true)) : false));
 }
+
+/* -------------------------------- component ------------------------------- */
 
 const ProfileCard: React.FC<Props> = ({
   user,
   compact = false,
   origin,
-  invited = false,
+  invited: invitedProp = false,
   onInvite,
+  dateId,
+  meId,
   onPressProfile,
   onNamePress,
-  onAvatarPress, // not used
+  onAvatarPress, // not used, kept for API compatibility
 }) => {
   const navigation = useNavigation<any>();
 
@@ -121,6 +135,59 @@ const ProfileCard: React.FC<Props> = ({
 
   const flatRef = useRef<FlatList<string>>(null);
   const [index, setIndex] = useState(0);
+
+  const [invited, setInvited] = useState<boolean>(!!invitedProp);
+  const [inviting, setInviting] = useState<boolean>(false);
+
+  // Hydrate invited state from DB for idempotency / cross-device consistency
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const myId =
+          meId ||
+          (await supabase.auth.getUser()).data.user?.id ||
+          (await supabase.auth.getSession()).data.session?.user?.id ||
+          null;
+
+        if (!dateId || !myId) return;
+
+        // NEW flow first: date_requests
+        const { data: dr, error: drErr } = await supabase
+          .from('date_requests')
+          .select('id')
+          .eq('date_id', dateId)
+          .eq('requester_id', myId)
+          .eq('recipient_id', user.id)
+          .eq('status', 'pending')
+          .limit(1);
+
+        if (!cancelled && !drErr && Array.isArray(dr) && dr.length > 0) {
+          setInvited(true);
+          return;
+        }
+
+        // Legacy fallback: invites
+        const { data: inv, error: iErr } = await supabase
+          .from('invites')
+          .select('id')
+          .eq('date_id', dateId)
+          .eq('inviter_id', myId)
+          .eq('invitee_id', user.id)
+          .eq('status', 'pending')
+          .limit(1);
+
+        if (!cancelled && !iErr && Array.isArray(inv) && inv.length > 0) {
+          setInvited(true);
+        }
+      } catch {
+        /* ignore; UI stays optimistic */
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateId, meId, user?.id]);
 
   const safeOpenProfile = useCallback(() => {
     if (onPressProfile) { onPressProfile(); return; }
@@ -198,8 +265,135 @@ const ProfileCard: React.FC<Props> = ({
         </TouchableOpacity>
       );
     },
-    [safeOpenProfile, safeOpenProfileFromName, CARD_WIDTH, CARD_HEIGHT, photos.length, index, user?.screenname, age, user?.gender, user?.orientation, user?.preferences, user?.location, distanceMiles]
+    [
+      safeOpenProfile,
+      safeOpenProfileFromName,
+      CARD_WIDTH,
+      CARD_HEIGHT,
+      photos.length,
+      index,
+      user?.screenname,
+      age,
+      user?.gender,
+      user?.orientation,
+      user?.preferences,
+      user?.location,
+      distanceMiles,
+    ]
   );
+
+  /* ------------------------------ invite logic ------------------------------ */
+
+  const builtInInvite = useCallback(async () => {
+    if (inviting || invited) return;
+
+    // If parent supplied its own handler, defer to it.
+    if (onInvite) {
+      onInvite();
+      return;
+    }
+
+    // We handle invite here (new flow + legacy fallback)
+    if (!dateId) {
+      Alert.alert('Missing date', 'Cannot send invite — this card did not receive a dateId.');
+      return;
+    }
+
+    setInviting(true);
+    try {
+      const myId =
+        meId ||
+        (await supabase.auth.getUser()).data.user?.id ||
+        (await supabase.auth.getSession()).data.session?.user?.id ||
+        null;
+
+      if (!myId) throw new Error('Could not determine your user id.');
+      if (!user?.id) throw new Error('Invitee is missing an id.');
+
+      // NEW FLOW — date_requests (idempotent check)
+      {
+        const { data: exists, error: exErr } = await supabase
+          .from('date_requests')
+          .select('id')
+          .eq('date_id', dateId)
+          .eq('requester_id', myId)
+          .eq('recipient_id', user.id)
+          .eq('status', 'pending')
+          .limit(1);
+
+        if (!exErr && Array.isArray(exists) && exists.length > 0) {
+          setInvited(true);
+          return;
+        }
+      }
+
+      // Try insert into date_requests
+      const { data: drIns, error: drErr } = await supabase
+        .from('date_requests')
+        .insert([{ date_id: dateId, requester_id: myId, recipient_id: user.id, status: 'pending' }])
+        .select('id')
+        .single();
+
+      if (!drErr && drIns?.id) {
+        setInvited(true);
+
+        // Quiet in-app notification to invitee (non-blocking)
+        try {
+          await supabase.from('notifications').insert([
+            {
+              user_id: user.id,
+              message: `You’ve been invited to a date.`,
+              screen: 'DateFeed',
+              params: { date_id: dateId, action: 'invite_received' },
+            },
+          ]);
+        } catch {}
+
+        return;
+      }
+
+      // LEGACY FALLBACK — invites
+      {
+        const { data: exists2, error: ex2Err } = await supabase
+          .from('invites')
+          .select('id')
+          .eq('date_id', dateId)
+          .eq('inviter_id', myId)
+          .eq('invitee_id', user.id)
+          .eq('status', 'pending')
+          .limit(1);
+
+        if (!ex2Err && Array.isArray(exists2) && exists2.length > 0) {
+          setInvited(true);
+          return;
+        }
+
+        const { error: insLegacyErr } = await supabase
+          .from('invites')
+          .insert([{ date_id: dateId, inviter_id: myId, invitee_id: user.id, status: 'pending' }]);
+
+        if (insLegacyErr) throw insLegacyErr;
+        setInvited(true);
+
+        try {
+          await supabase.from('notifications').insert([
+            {
+              user_id: user.id,
+              message: `You’ve been invited to a date.`,
+              screen: 'DateFeed',
+              params: { date_id: dateId, action: 'invite_received' },
+            },
+          ]);
+        } catch {}
+      }
+    } catch (e: any) {
+      Alert.alert('Invite failed', e?.message || 'Please try again.');
+    } finally {
+      setInviting(false);
+    }
+  }, [inviting, invited, onInvite, dateId, meId, user?.id]);
+
+  /* ---------------------------------- render -------------------------------- */
 
   return (
     <View
@@ -223,19 +417,23 @@ const ProfileCard: React.FC<Props> = ({
       />
 
       <TouchableOpacity
-        onPress={onInvite}
-        style={[styles.inviteButton, invited && styles.inviteButtonDisabled]}
+        onPress={builtInInvite}
+        style={[styles.inviteButton, (invited || inviting) && styles.inviteButtonDisabled]}
         activeOpacity={invited ? 1 : 0.9}
-        disabled={invited}
+        disabled={invited || inviting}
         accessibilityRole="button"
-        accessibilityState={{ disabled: invited }}
-        accessibilityLabel={invited ? 'Already invited' : 'Invite user'}
+        accessibilityState={{ disabled: invited || inviting }}
+        accessibilityLabel={invited ? 'Already invited' : (inviting ? 'Sending invite' : 'Invite user')}
       >
-        <Text style={styles.inviteText}>{invited ? 'Invited' : 'Invite'}</Text>
+        <Text style={styles.inviteText}>
+          {invited ? 'Invited' : inviting ? 'Inviting…' : 'Invite'}
+        </Text>
       </TouchableOpacity>
     </View>
   );
 };
+
+/* ---------------------------------- styles --------------------------------- */
 
 const DOT_SIZE = 7;
 
@@ -253,8 +451,6 @@ const styles = StyleSheet.create({
   overlay: {
     backgroundColor: 'rgba(0,0,0,0.45)',
     padding: 12,
-    borderBottomLeftRadius: 0,
-    borderBottomRightRadius: 0,
   },
   nameRow: { flexDirection: 'row', alignItems: 'flex-end' },
   name: { fontSize: 22, color: 'white', fontWeight: 'bold', lineHeight: 26 },

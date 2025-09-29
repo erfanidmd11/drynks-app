@@ -50,3 +50,5 @@ Supabase/.temp/
 .expo
 .expo-shared
 .expo-config.*
+
+echo "supabase/.secrets" >> .gitignore

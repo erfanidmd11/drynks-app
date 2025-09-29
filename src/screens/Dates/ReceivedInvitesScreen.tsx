@@ -1,5 +1,5 @@
 // src/screens/Dates/ReceivedInvitesScreen.tsx
-// Production‑ready: shows only *pending* invites for the logged‑in user.
+// Production‑ready: shows only *pending-like* invites for the logged‑in user.
 // Compatible with two backends:
 //
 //  A) New flow (recommended)
@@ -9,7 +9,7 @@
 //  B) Legacy flow
 //     • Table: public.invites (id, date_id, inviter_id, invitee_id, status)
 //
-// The screen enriches invites with feed data (vw_feed_dates_v2 → vw_feed_dates),
+// The screen enriches invites with feed data (vw_feed_dates_v2 → vw_feed_dates → FALLBACK: date_requests),
 // pulls creator + accepted profiles, derives full/expired, and renders context‑aware
 // DateCard in RECEIVED_INVITES mode (swipe right = Accept, left = Decline).
 
@@ -35,6 +35,9 @@ type UUID = string;
 const DRYNKS_RED   = '#E34E5C';
 const DRYNKS_GREEN = '#22C55E';
 const DRYNKS_TEXT  = '#2B2B2B';
+
+// Accept these as "pending-like" statuses (new + legacy)
+const SHOWABLE_STATUSES = new Set(['pending', 'sent', 'invited']);
 
 /* --------------------------------- helpers --------------------------------- */
 
@@ -86,7 +89,7 @@ type ViewReceivedRow = {
   date_id: UUID;
   inviter_id: UUID; // unified
   me_id: UUID;
-  status: 'pending' | 'accepted' | 'declined' | 'cancelled' | 'removed_by_host' | 'date_cancelled';
+  status: string; // tolerate backend variants
   created_at: string;
   title: string | null;
   event_date: string | null;
@@ -99,7 +102,7 @@ type InvitesLegacyRow = {
   date_id: UUID;
   inviter_id: UUID;
   invitee_id: UUID;
-  status: 'pending' | 'accepted' | 'revoked' | 'dismissed' | 'cancelled';
+  status: string; // tolerate backend variants
   created_at: string;
 };
 
@@ -117,6 +120,7 @@ type FeedBase = {
   id: UUID;
   creator: UUID;
   event_type: string | null;
+  title?: string | null;
   event_date: string | null;
   location: string | null;
   created_at: string | null;
@@ -161,31 +165,84 @@ type ReceivedItem = {
 
 /* --------------------------- fetch helper methods --------------------------- */
 
+// Feed (v2 → v1 → FALLBACK date_requests)
 async function fetchFeedRowsFor(dateIds: UUID[]): Promise<FeedBase[]> {
   if (!dateIds.length) return [];
-  // Try v2 first
+
+  const out: FeedBase[] = [];
+  const missing = new Set(dateIds);
+
+  // Try v2
   try {
     const { data, error } = await supabase
       .from('vw_feed_dates_v2')
       .select(`
-        id, creator, event_type, event_date, location, created_at,
+        id, creator, event_type, title, event_date, location, created_at,
         accepted_users, orientation_preference, spots, remaining_gender_counts,
         photo_urls, profile_photo, date_cover, creator_photo
       `)
       .in('id', dateIds);
     if (error) throw error;
-    if (Array.isArray(data) && data.length) return data as FeedBase[];
-  } catch { /* fall back */ }
-  const { data } = await supabase
-    .from('vw_feed_dates')
-    .select(`
-      id, creator, event_type, event_date, location, created_at,
-      accepted_users, orientation_preference, spots, remaining_gender_counts,
-      photo_urls, profile_photo
-    `)
-    .in('id', dateIds);
+    for (const r of (data || []) as any[]) {
+      out.push(r as FeedBase);
+      missing.delete(r.id);
+    }
+  } catch { /* fall through */ }
 
-  return (data || []) as FeedBase[];
+  // Try v1 for remaining
+  if (missing.size) {
+    try {
+      const { data } = await supabase
+        .from('vw_feed_dates')
+        .select(`
+          id, creator, event_type, event_date, location, created_at,
+          accepted_users, orientation_preference, spots, remaining_gender_counts,
+          photo_urls, profile_photo
+        `)
+        .in('id', Array.from(missing));
+      for (const r of (data || []) as any[]) {
+        out.push(r as FeedBase);
+        missing.delete(r.id);
+      }
+    } catch { /* fall through */ }
+  }
+
+  // FINAL FALLBACK: hit date_requests directly so we never drop invites just
+  // because the materialized/complex views haven’t caught up yet.
+  if (missing.size) {
+    try {
+      const { data } = await supabase
+        .from('date_requests')
+        .select(`
+          id, creator, event_type, title, event_date, location, created_at,
+          accepted_users, orientation_preference, spots,
+          photo_urls, profile_photo
+        `)
+        .in('id', Array.from(missing));
+      for (const r of (data || []) as any[]) {
+        out.push({
+          id: r.id,
+          creator: r.creator,
+          event_type: r.event_type ?? null,
+          title: r.title ?? null,
+          event_date: r.event_date ?? null,
+          location: r.location ?? null,
+          created_at: r.created_at ?? null,
+          accepted_users: Array.isArray(r.accepted_users) ? r.accepted_users : null,
+          orientation_preference: Array.isArray(r.orientation_preference) ? r.orientation_preference : null,
+          spots: typeof r.spots === 'number' ? r.spots : null,
+          remaining_gender_counts: null, // not available here
+          photo_urls: Array.isArray(r.photo_urls) ? r.photo_urls : null,
+          profile_photo: r.profile_photo ?? null,
+          date_cover: null,
+          creator_photo: null,
+        } as FeedBase);
+        missing.delete(r.id);
+      }
+    } catch { /* ignore; we’ll handle any stubborn misses later */ }
+  }
+
+  return out;
 }
 
 async function fetchProfilesMap(ids: UUID[]): Promise<Map<UUID, ProfileLite>> {
@@ -317,7 +374,6 @@ const ReceivedInvitesScreen: React.FC = () => {
   // realtime channels
   const chDateReqRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const chInvitesRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const chDatesRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -331,79 +387,71 @@ const ReceivedInvitesScreen: React.FC = () => {
   const detachRealtime = useCallback(() => {
     try { chDateReqRef.current?.unsubscribe(); } catch {}
     try { chInvitesRef.current?.unsubscribe(); } catch {}
-    try { chDatesRef.current?.unsubscribe(); } catch {}
-    chDateReqRef.current = chInvitesRef.current = chDatesRef.current = null;
+    chDateReqRef.current = chInvitesRef.current = null;
   }, []);
 
   const attachRealtime = useCallback((dateIds: UUID[], viewer: UUID) => {
     detachRealtime();
 
-    chDateReqRef.current = supabase
-      .channel('rx_received_invites_dr')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'date_requests', filter: `recipient_id=eq.${viewer}` },
-        () => { fetchInvites(viewer); }
-      )
-      .subscribe(() => {});
-
+    // Listen to the invites table for this user (new and legacy)
     chInvitesRef.current = supabase
-      .channel('rx_received_invites_legacy')
+      .channel('rx_received_invites_invites')
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'invites', filter: `invitee_id=eq.${viewer}` },
         () => { fetchInvites(viewer); }
       )
       .subscribe(() => {});
 
+    // Also listen to date_requests by the invited date IDs (status/fields can change)
     if (dateIds.length) {
       const idList = dateIds.join(',');
-      chDatesRef.current = supabase
-        .channel('rx_received_invites_dates')
+      chDateReqRef.current = supabase
+        .channel('rx_received_invites_date_requests')
         .on('postgres_changes',
-          { event: '*', schema: 'public', table: 'dates', filter: `id=in.(${idList})` },
+          { event: '*', schema: 'public', table: 'date_requests', filter: `id=in.(${idList})` },
           () => { fetchInvites(viewer); }
         )
         .subscribe(() => {});
     }
   }, [detachRealtime]);
 
-  /** Fetch from v_received_invites and normalize inviter column without referring to legacy names in source. */
-const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewReceivedRow[] | null> => {
-  try {
-    const { data, error } = await supabase
-      .from('v_received_invites')
-      .select('*')
-      .eq('me_id', viewer)
-      .order('created_at', { ascending: false });
+  /** Fetch from v_received_invites and normalize inviter column. */
+  const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewReceivedRow[] | null> => {
+    try {
+      const { data, error } = await supabase
+        .from('v_received_invites')
+        .select('*')
+        .eq('me_id', viewer)
+        .order('created_at', { ascending: false });
 
-    if (error) throw error;
+      if (error) throw error;
 
-    const rows = (data || []) as any[];
+      const rows = (data || []) as any[];
 
-    // Build the legacy key name at runtime to avoid hard-coding it in source.
-    const LEGACY_INVITER_COL = ('ho' + 'st' + '_' + 'id'); // === "host_id" at runtime, never in source
+      // Build the legacy key name at runtime to avoid hard-coding it in source.
+      const LEGACY_INVITER_COL = ('ho' + 'st' + '_' + 'id'); // === "host_id" at runtime, never in source
 
-    const normalized: ViewReceivedRow[] = rows.map((r: any) => ({
-      req_id: r.req_id,
-      date_id: r.date_id,
-      inviter_id: r.inviter_id ?? r[LEGACY_INVITER_COL], // prefer inviter_id; fallback to legacy column
-      me_id: r.me_id,
-      status: r.status,
-      created_at: r.created_at,
-      title: r.title ?? null,
-      event_date: r.event_date ?? null,
-      event_timezone: r.event_timezone ?? null,
-      date_status: r.date_status ?? 'active',
-    }))
-    // Filter out any row where we still couldn’t determine inviter
-    .filter(r => !!r.inviter_id);
+      const normalized: ViewReceivedRow[] = rows.map((r: any) => ({
+        req_id: r.req_id,
+        date_id: r.date_id,
+        inviter_id: r.inviter_id ?? r[LEGACY_INVITER_COL], // prefer inviter_id; fallback to legacy column
+        me_id: r.me_id,
+        status: r.status,
+        created_at: r.created_at,
+        title: r.title ?? null,
+        event_date: r.event_date ?? null,
+        event_timezone: r.event_timezone ?? null,
+        date_status: r.date_status ?? 'active',
+      }))
+      .filter(r => !!r.inviter_id);
 
-    return normalized;
-  } catch {
-    return null;
-  }
-}, []);
+      return normalized;
+    } catch {
+      return null;
+    }
+  }, []);
 
-  /** Main fetch (supports both backends). */
+  /** Main fetch (supports both backends) with robust fallbacks. */
   const fetchInvites = useCallback(async (uid?: UUID | null) => {
     const viewer = (uid ?? me) as UUID | null;
     if (!viewer) { setRows([]); setLoading(false); setRefreshing(false); return; }
@@ -419,11 +467,12 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
       title?: string | null;
       event_date?: string | null;
       event_timezone?: string | null;
+      status?: string | null;
     }> = [];
 
     if (viewRows && viewRows.length) {
       invites = viewRows
-        .filter(r => r.status === 'pending')
+        .filter(r => SHOWABLE_STATUSES.has(String(r.status).toLowerCase()))
         .map(r => ({
           req_id: r.req_id,
           date_id: r.date_id,
@@ -432,6 +481,7 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
           title: r.title,
           event_date: r.event_date,
           event_timezone: r.event_timezone,
+          status: r.status,
         }));
     } else {
       // Legacy fallback: invites table
@@ -439,7 +489,7 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
         .from('invites')
         .select('id, date_id, inviter_id, invitee_id, status, created_at')
         .eq('invitee_id', viewer)
-        .eq('status', 'pending')
+        .in('status', Array.from(SHOWABLE_STATUSES))
         .order('created_at', { ascending: false });
       if (legErr) {
         console.error('[ReceivedInvites] load error', legErr);
@@ -452,6 +502,7 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
         date_id: r.date_id,
         inviter_id: r.inviter_id,
         created_at: r.created_at,
+        status: r.status,
       }));
     }
 
@@ -464,25 +515,61 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
 
     const dateIds = Array.from(new Set(invites.map(r => r.date_id)));
 
-    // 2) Base feed rows
+    // 2) Base feed rows (with hard fallback to date_requests)
     const baseRows = await fetchFeedRowsFor(dateIds);
     const baseById = new Map(baseRows.map(r => [r.id, r]));
 
-    // 3) Profiles for creators + accepted users
+    // 3) Profiles for creators (feed) + accepted users + (safety) inviters
     const creatorIds = Array.from(new Set(baseRows.map(r => r.creator))).filter(Boolean);
     const acceptedIds = Array.from(
       new Set(baseRows.flatMap(r => Array.isArray(r.accepted_users) ? r.accepted_users : []))
     ).filter(Boolean);
+    const inviterIds = Array.from(new Set(invites.map(r => r.inviter_id))).filter(Boolean);
 
     const [profilesMap, extrasMap] = await Promise.all([
-      fetchProfilesMap([...creatorIds, ...acceptedIds]),
+      fetchProfilesMap([...creatorIds, ...acceptedIds, ...inviterIds]),
       fetchExtrasMap(dateIds),
     ]);
 
-    // 4) Build rows for UI
+    // 4) Build rows for UI (never drop a row if feed is missing — build a minimal card)
     const built: ReceivedItem[] = invites.map(inv => {
       const r = baseById.get(inv.date_id) as FeedBase | undefined;
-      if (!r) return null as any;
+
+      // If the feed/fallback record is missing, compose a minimal row using inviter profile and view data.
+      if (!r) {
+        const inviter_profile = profilesMap.get(inv.inviter_id) || null;
+        const extra = extrasMap.get(inv.date_id) || { who_pays: null, event_timezone: inv.event_timezone ?? null };
+        const expired = isPastLocalEndOfDay(inv.event_date ?? null, extra.event_timezone ?? null);
+        const cover = inviter_profile?.profile_photo ?? null;
+
+        return {
+          req_id: inv.req_id,
+          date_id: inv.date_id,
+          inviter_id: inv.inviter_id,
+          created_at: inv.created_at,
+          tag_cover: cover,
+
+          title: inv.title ?? null,
+          event_date: inv.event_date ?? null,
+          event_timezone: inv.event_timezone ?? extra.event_timezone ?? null,
+          location: null,
+          who_pays: extra.who_pays ?? null,
+          event_type: null,
+          orientation_preference: null,
+          spots: null,
+          remaining_gender_counts: null,
+
+          creator_id: inv.inviter_id,
+          creator_profile: inviter_profile,
+          accepted_profiles: null,
+
+          profile_photo: inviter_profile?.profile_photo ?? null,
+          photo_urls: cover ? [cover] : [],
+
+          full: false,
+          expired,
+        } as ReceivedItem;
+      }
 
       const creator_profile = profilesMap.get(r.creator) || null;
       const cleanLoc = !looksLikeWKTOrHex(r.location) ? r.location : (creator_profile?.location ?? null);
@@ -519,7 +606,7 @@ const fetchInvitesFromView = useCallback(async (viewer: UUID): Promise<ViewRecei
         created_at: inv.created_at,
         tag_cover: cover,
 
-        title: (r as any).title ?? r.event_type ?? null, // prefer title if your view includes it
+        title: (r as any).title ?? inv.title ?? r.event_type ?? null, // prefer title -> view title -> event_type
         event_date: inv.event_date ?? r.event_date ?? null,
         event_timezone: inv.event_timezone ?? extra.event_timezone ?? null,
         location: cleanLoc ?? null,
