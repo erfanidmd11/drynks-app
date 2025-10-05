@@ -52,3 +52,4 @@ Supabase/.temp/
 .expo-config.*
 
 echo "supabase/.secrets" >> .gitignore
+.expo/
