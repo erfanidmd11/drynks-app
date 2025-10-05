@@ -6,6 +6,7 @@
 //  - If viewer is Female, require female slots > 0 (configurable below).
 //  - Keep creator/accepted profile hydration + who_pays & lat/lng hydration.
 //  - Invite-link pinning + robust places autocomplete remain intact.
+//  - **NEW:** De-dupe feed items by id (render + state) to eliminate duplicate keys.
 
 import React, {
   useState,
@@ -128,68 +129,16 @@ const looksLikeWKTOrHex = (s?: string | null) =>
 
 const hiddenKeyFor = (uid: string) => `hidden_dates_v1:${uid}`;
 
-// Debounce
-function useDebouncedValue<T>(value: T, delay = 250) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
-
-// Distance
-const toRad = (x: number) => (x * Math.PI) / 180;
-function milesBetween(
-  aLat?: number | null,
-  aLng?: number | null,
-  bLat?: number | null,
-  bLng?: number | null
-) {
-  if (
-    aLat == null ||
-    aLng == null ||
-    bLat == null ||
-    bLng == null ||
-    Number.isNaN(+aLat) ||
-    Number.isNaN(+aLng) ||
-    Number.isNaN(+bLat) ||
-    Number.isNaN(+bLng)
-  )
-    return null;
-  const R = 3958.7613; // miles
-  const dLat = toRad(bLat - aLat);
-  const dLon = toRad(bLng - aLng);
-  const la1 = toRad(aLat);
-  const la2 = toRad(bLat);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-function parseWktPoint(s?: string | null): { lat: number; lng: number } | null {
-  if (!s || !/^SRID=/i.test(s)) return null;
-  const m = /POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i.exec(s);
-  if (!m) return null;
-  const lon = parseFloat(m[1]);
-  const lat = parseFloat(m[2]);
-  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
-  return { lat, lng: lon };
-}
-
-function isCityPrediction(p: any): boolean {
-  const t: string[] = Array.isArray(p?.types) ? p.types : [];
-  if (t.includes('locality')) return true;
-  if (
-    t.includes('administrative_area_level_3') ||
-    t.includes('administrative_area_level_2')
-  )
-    return true;
-  const commas = String(p?.description || '').split(',').length - 1;
-  return commas >= 1 && !t.includes('establishment');
-}
+// De-dupe helpers
+const uniqueById = (arr: DateRow[]): DateRow[] => {
+  const map = new Map<string, DateRow>();
+  for (const r of arr) {
+    const id = String(r?.id ?? '');
+    if (!id) continue;
+    if (!map.has(id)) map.set(id, r);
+  }
+  return [...map.values()];
+};
 
 const DateFeedScreen: React.FC<ScreenProps> = (props) => {
   const { navigation, route, scrollToDateId } = props;
@@ -237,6 +186,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [openDropdown, setOpenDropdown] = useState(false);
+
   const debouncedQuery = useDebouncedValue(locationName, 250);
   const hasPlaces = HAS_PLACES;
   const didInitLocationRef = useRef(false);
@@ -330,6 +280,16 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
       // ignore
     }
   }, []);
+
+  // Debounce helper hook
+  function useDebouncedValue<T>(value: T, delay = 250) {
+    const [debounced, setDebounced] = useState(value);
+    useEffect(() => {
+      const id = setTimeout(() => setDebounced(value), delay);
+      return () => clearTimeout(id);
+    }, [value, delay]);
+    return debounced;
+  }
 
   const refreshListRef = useRef<
     null | ((coords?: { lat: number; lng: number }) => Promise<void>)
@@ -446,6 +406,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     if (!d?.event_date) return false;
     const dt = new Date(d.event_date);
     return !Number.isNaN(+dt) && dt < new Date();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   };
   const isFull = (d: DateRow) => {
     const rgc = d.remaining_gender_counts;
@@ -687,6 +648,46 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     },
     [overrideCoords, profile]
   );
+
+  // Distance helpers
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  function milesBetween(
+    aLat?: number | null,
+    aLng?: number | null,
+    bLat?: number | null,
+    bLng?: number | null
+  ) {
+    if (
+      aLat == null ||
+      aLng == null ||
+      bLat == null ||
+      bLng == null ||
+      Number.isNaN(+aLat) ||
+      Number.isNaN(+aLng) ||
+      Number.isNaN(+bLat) ||
+      Number.isNaN(+bLng)
+    )
+      return null;
+    const R = 3958.7613; // miles
+    const dLat = toRad(bLat - aLat);
+    const dLon = toRad(bLng - aLng);
+    const la1 = toRad(aLat);
+    const la2 = toRad(bLat);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+  function parseWktPoint(s?: string | null): { lat: number; lng: number } | null {
+    if (!s || !/^SRID=/i.test(s)) return null;
+    const m = /POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i.exec(s);
+    if (!m) return null;
+    const lon = parseFloat(m[1]);
+    const lat = parseFloat(m[2]);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+    return { lat, lng: lon };
+  }
 
   /**
    * Fetch a page; compute distance using coordsOverride or last known/viewer coords.
@@ -1004,7 +1005,8 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
           }`
         );
       }
-      return { rows: sorted, pageUsed: pageArg };
+      // **De-dupe by id right here (page boundary safety)**
+      return { rows: uniqueById(sorted), pageUsed: pageArg };
     },
     [
       canQuery,
@@ -1030,7 +1032,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         setRefreshing(true);
         setRpcError(null);
         const { rows } = await fetchPage(1, _coordsOverride);
-        setDates(rows);
+        setDates(uniqueById(rows)); // ✅ de-dupe on refresh
         setPage(2);
         setHasMore(rows.length === PAGE_SIZE);
         setFirstLoadDone(true);
@@ -1059,7 +1061,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         page,
         lastCoordsRef.current || undefined
       );
-      setDates((prev) => [...prev, ...rows]);
+      setDates((prev) => uniqueById([...prev, ...rows])); // ✅ safe append
       if (rows.length === PAGE_SIZE) setPage((prev) => prev + 1);
       else setHasMore(false);
     } catch (e) {
@@ -1094,7 +1096,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     async (dateId: string) => {
       if (!userId) return;
       setPinned((p) => (p?.id && String(p.id) === String(dateId) ? null : p));
-      setDates((prev) => prev.filter((d) => String(d.id) !== String(dateId)));
+      setDates((prev) => uniqueById(prev.filter((d) => String(d.id) !== String(dateId))));
       const next = new Set(hiddenIds);
       next.add(String(dateId));
       setHiddenIds(next);
@@ -1121,10 +1123,7 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
       if (!row) return;
 
       setPinned(row);
-      setDates((prev) => [
-        row!,
-        ...prev.filter((d) => String(d.id) !== String(row!.id)),
-      ]);
+      setDates((prev) => uniqueById([row!, ...prev.filter((d) => String(d.id) !== String(row!.id))]));
 
       setTimeout(() => {
         try {
@@ -1694,6 +1693,24 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
     [pinned, dates]
   );
 
+  // **Final last-mile de-dupe for render safety**
+  const safeData = useMemo(() => uniqueById(listData), [listData]);
+
+  // DEV-only: log if duplicates slipped through
+  if (__DEV__) {
+    const seen = new Set<string>();
+    const dups: string[] = [];
+    for (const it of safeData) {
+      const k = String(it.id);
+      if (seen.has(k)) dups.push(k);
+      seen.add(k);
+    }
+    if (dups.length) {
+      // eslint-disable-next-line no-console
+      console.warn('[DateFeed] duplicate ids after safeData de-dupe', dups);
+    }
+  }
+
   // --- UI ---
   return (
     <AnimatedScreenWrapper
@@ -1706,8 +1723,8 @@ const DateFeedScreen: React.FC<ScreenProps> = (props) => {
         <FlatList
           ref={flatListRef}
           contentContainerStyle={{ paddingBottom: 24, paddingTop: 8 }}
-          data={listData}
-          keyExtractor={(item) => String(item.id)}
+          data={safeData}                         // ✅ de-duped data
+          keyExtractor={(item) => String(item.id)}// ✅ stable & unique now
           renderItem={({ item }) => (
             <DateCard
               date={item}

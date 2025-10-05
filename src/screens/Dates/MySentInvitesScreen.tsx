@@ -1,10 +1,7 @@
-// src/screens/Dates/MySentInvitesScreen.tsx
-// My Sent Invites — RN 0.81 safe, dual-backend, status-robust.
-// - NEW flow (preferred): v_sent_invites (filtered by me), joins data from date_requests
-// - LEGACY flow: public.invites (status in ['pending','sent','invited'])
-// - DateTag above each ProfileCard
-// - Realtime on my invites + affected date rows
-// - No RNGH/Reanimated usage (avoids findHostInstance_DEPRECATED crash)
+// My Sent Invites — production-ready, RPC-based rescind + lean realtime.
+// - PRIMARY: v_sent_invites (already scoped by auth.uid())
+// - FALLBACKS: date_requests (authoritative) → invites (legacy only for hydration)
+// - Rescind uses public.invites_decide(req_id,'rescinded') and optimistically prunes UI.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -34,7 +31,8 @@ const DRYNKS_RED  = '#E34E5C';
 const DRYNKS_BLUE = '#232F39';
 const DRYNKS_TEXT = '#2B2B2B';
 
-const SHOWABLE_STATUSES = new Set(['pending', 'sent', 'invited']); // <- key fix
+// We show only "pending-like" rows (view/legacy may label them differently)
+const SHOWABLE_STATUSES = new Set(['pending', 'sent', 'invited']);
 
 /* -------------------------------- helpers -------------------------------- */
 
@@ -44,20 +42,16 @@ const looksLikeWKTOrHex = (s?: string | null) =>
 const sumRemaining = (rgc?: Record<string, number> | null) =>
   Object.values(rgc ?? {}).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
 
-/** Safely parse remaining_gender_counts whether it's jsonb, text, or null */
 function parseRemainingCounts(v: unknown): Record<string, number> | null {
   if (!v) return null;
   if (typeof v === 'object' && !Array.isArray(v)) return v as Record<string, number>;
   if (typeof v === 'string') {
-    try {
-      const o = JSON.parse(v);
-      return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, number>) : null;
-    } catch { return null; }
+    try { const o = JSON.parse(v); return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, number>) : null; }
+    catch { return null; }
   }
   return null;
 }
 
-/** Get Y-M-D of a Date as it appears in an IANA time zone */
 function getYMDInTZ(date: Date, timeZone: string): { y: number; m: number; d: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -71,7 +65,6 @@ function getYMDInTZ(date: Date, timeZone: string): { y: number; m: number; d: nu
   return { y, m, d };
 }
 
-/** True iff today (in event TZ) is after the event's calendar date */
 function isPastLocalEndOfDay(eventISO?: string | null, timeZone?: string | null): boolean {
   if (!eventISO) return false;
   try {
@@ -92,7 +85,6 @@ function isPastLocalEndOfDay(eventISO?: string | null, timeZone?: string | null)
   }
 }
 
-/** Friendly date like "Sat, Oct 25" in the event's timezone */
 function formatEventDay(eventISO?: string | null, timeZone?: string | null): string | null {
   if (!eventISO) return null;
   try {
@@ -107,34 +99,33 @@ function formatEventDay(eventISO?: string | null, timeZone?: string | null): str
   } catch { return null; }
 }
 
+/** Parse gallery_photos robustly across jsonb/text[]/string */
+const toStringArray = (v: any): string[] => {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(String).filter(Boolean);
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return [];
+    if (s.startsWith('[')) { try { const arr = JSON.parse(s); return Array.isArray(arr) ? arr.map(String) : []; } catch {} }
+    if (s.startsWith('{') && s.endsWith('}')) {
+      const inner = s.slice(1, -1);
+      const out: string[] = [];
+      let buf = '', q = false;
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i];
+        if (ch === '"') { if (q && inner[i+1] === '"') { buf += '"'; i++; } else { q = !q; } continue; }
+        if (ch === ',' && !q) { out.push(buf); buf=''; continue; }
+        buf += ch;
+      }
+      out.push(buf);
+      return out.map(s => s.trim()).filter(Boolean);
+    }
+  }
+  return [];
+};
+
 /* ---------------------------- DB shapes ----------------------------- */
 
-// NEW view (host -> recipients)
-type ViewSentRow = {
-  req_id: UUID;
-  date_id: UUID;
-  recipient_id: UUID;
-  created_at: string;
-  status?: string | null;
-  inviter_id?: UUID | null; // some views expose this
-  host_id?: UUID | null;    // some views expose this
-  // Optional convenience columns:
-  title?: string | null;
-  event_date?: string | null;
-  event_timezone?: string | null;
-};
-
-// LEGACY invites table
-type InviteRow = {
-  id: UUID;
-  date_id: UUID;
-  inviter_id: UUID;
-  invitee_id: UUID;
-  status: string; // tolerate non-pending values
-  created_at: string;
-};
-
-// Date (from date_requests preferred; fallback dates)
 type DateRow = {
   id: UUID;
   title?: string | null;
@@ -147,36 +138,108 @@ type DateRow = {
   photo_urls?: string[] | null;
   cover_image_url?: string | null;
   creator?: UUID | null;
-  creator_id?: UUID | null;
-  user_id?: UUID | null;
-  uid?: UUID | null;
+  creator_id?: UUID | null; user_id?: UUID | null; uid?: UUID | null;
   spots?: number | null;
-  remaining_gender_counts?: any;      // jsonb | text | null
+  remaining_gender_counts?: any;
   location?: string | null;
   location_str?: string | null;
 };
 
-// Recipient profile
 type ProfileRow = {
   id: UUID;
   screenname: string | null;
   profile_photo?: string | null;
   location?: string | null;
-  latitude?: number | null;
-  longitude?: number | null;
   gender?: string | null;
   orientation?: string | string[] | null;
   about?: string | null;
   gallery_photos?: any;
 };
 
-/* ------------------------------ UI row ------------------------------ */
+/* ------------- normalization of recipient ids (profile + auth) ------------- */
+
+type PendingCore = {
+  req_id: UUID;             // SHOULD be date_requests.id when coming from view/date_requests
+  date_id: UUID;
+  created_at: string;
+  recipient_profile_id?: UUID | null;
+  recipient_auth_id?: UUID | null;
+  _title?: string | null;
+  _event_date?: string | null;
+  _event_tz?: string | null;
+};
+
+const readStr = (v: any): string | null =>
+  typeof v === 'string' && v.length >= 8 ? v : null;
+
+/** Treat invitee_id/recipient_id as PROFILE ids (matches ManageApplicants). */
+const extractRecipientIds = (row: any): { profileId?: UUID | null; authId?: UUID | null } => {
+  const profileId =
+    readStr(row.recipient_profile_id) ??
+    readStr(row.invitee_profile_id) ??
+    readStr(row.profile_id) ??
+    readStr(row.applicant_id) ??
+    readStr(row.recipient_profile) ??
+    readStr(row.invitee_profile) ??
+    readStr(row.invitee_id) ??          // legacy; we treat as profiles.id
+    readStr(row.recipient_id) ?? null;  // legacy; we treat as profiles.id
+
+  const authId =
+    readStr(row.user_id) ??
+    readStr(row.uid) ??
+    readStr(row.requester_id) ??
+    readStr(row.recipient_user_id) ??
+    readStr(row.invitee_user_id) ?? null;
+
+  return { profileId, authId };
+};
+
+/* ----------------------- small presentational bits ----------------------- */
+
+const DateTag: React.FC<{ title: string | null; event_date: string | null; tz: string | null; location: string | null; photo: string | null; disabled?: boolean }> = ({ title, event_date, tz, location, photo, disabled }) => {
+  const day = formatEventDay(event_date, tz);
+  return (
+    <View style={[styles.dateTag, disabled && { opacity: 0.55 }]}>
+      {photo ? (
+        <Image source={{ uri: photo }} style={styles.dateTagAvatar} />
+      ) : (
+        <View style={[styles.dateTagAvatar, styles.dateTagPlaceholder]}>
+          <Text style={styles.dateTagEmoji}>🍸</Text>
+        </View>
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={styles.dateTagTitle} numberOfLines={1}>
+          {title || 'Untitled date'}
+        </Text>
+        <Text style={styles.dateTagSub} numberOfLines={1}>
+          {day ? `${day}` : 'Upcoming'}{location ? ` · ${location}` : ''}
+        </Text>
+      </View>
+    </View>
+  );
+};
+
+const RescindButton: React.FC<{ onPress: () => void; disabled?: boolean }> = ({ onPress, disabled }) => (
+  <TouchableOpacity
+    onPress={onPress}
+    disabled={disabled}
+    style={[styles.rescindBtn, disabled && { opacity: 0.6 }]}
+    accessibilityRole="button"
+    accessibilityLabel="Rescind invite"
+  >
+    <Ionicons name="arrow-undo-outline" size={16} color="#166534" />
+    <Text style={styles.rescindText}>Rescind</Text>
+  </TouchableOpacity>
+);
+
+/* ------------------------------- Screen ------------------------------- */
 
 type SentItem = {
-  req_id: UUID;
+  req_id: UUID; // expected to be date_requests.id (from view or dr fallback)
   date_id: UUID;
-  recipient_id: UUID;
   created_at: string;
+  recipient_profile_id?: UUID | null;
+  recipient_auth_id?: UUID | null;
 
   user: {
     id: UUID;
@@ -205,40 +268,6 @@ type SentItem = {
   expired: boolean;
 };
 
-/* ----------------------- small presentational bits ----------------------- */
-
-const DateTag: React.FC<{ title: string | null; event_date: string | null; tz: string | null; location: string | null; photo: string | null; disabled?: boolean }> = ({ title, event_date, tz, location, photo, disabled }) => {
-  const day = formatEventDay(event_date, tz);
-  return (
-    <View style={[styles.dateTag, disabled && { opacity: 0.55 }]}>
-      {photo ? (
-        <Image source={{ uri: photo }} style={styles.dateTagAvatar} />
-      ) : (
-        <View style={[styles.dateTagAvatar, styles.dateTagPlaceholder]}>
-          <Text style={styles.dateTagEmoji}>🍸</Text>
-        </View>
-      )}
-      <View style={{ flex: 1 }}>
-        <Text style={styles.dateTagTitle} numberOfLines={1}>
-          {title || 'Untitled date'}
-        </Text>
-        <Text style={styles.dateTagSub} numberOfLines={1}>
-          {day ? `${day}` : 'Upcoming'}{location ? ` · ${location}` : ''}
-        </Text>
-      </View>
-    </View>
-  );
-};
-
-const RescindButton: React.FC<{ onPress: () => void }> = ({ onPress }) => (
-  <TouchableOpacity onPress={onPress} style={styles.rescindBtn} accessibilityRole="button" accessibilityLabel="Rescind invite">
-    <Ionicons name="arrow-undo-outline" size={16} color="#166534" />
-    <Text style={styles.rescindText}>Rescind</Text>
-  </TouchableOpacity>
-);
-
-/* ------------------------------- Screen ------------------------------- */
-
 const MySentInvitesScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const headerTitle = 'My Sent Invites';
@@ -249,11 +278,10 @@ const MySentInvitesScreen: React.FC = () => {
   const [rows, setRows] = useState<SentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyReqId, setBusyReqId] = useState<UUID | null>(null);
 
-  // realtime channels
-  const chInvitesSelfRef   = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const chDatesRef         = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const chInvitesDatesRef  = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  // single realtime channel (lean)
+  const chHostRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // session
   useEffect(() => {
@@ -262,8 +290,8 @@ const MySentInvitesScreen: React.FC = () => {
         supabase.auth.getSession(),
         supabase.auth.getUser(),
       ]);
-      const uid = sess?.session?.user?.id ?? user?.user?.id ?? null;
-      setMe(uid);
+        const uid = sess?.session?.user?.id ?? user?.user?.id ?? null;
+        setMe(uid);
     })();
   }, []);
 
@@ -271,158 +299,247 @@ const MySentInvitesScreen: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const seen = await AsyncStorage.getItem('hint_my_sent_invites_v8');
-        if (!seen) await AsyncStorage.setItem('hint_my_sent_invites_v8', 'true');
+        const seen = await AsyncStorage.getItem('hint_my_sent_invites_v11');
+        if (!seen) await AsyncStorage.setItem('hint_my_sent_invites_v11', 'true');
       } catch {}
     })();
   }, []);
 
   /* ------------------------- helpers: fetchers ------------------------- */
 
-  const fetchDateRequestsMap = useCallback(async (ids: UUID[]) => {
+  const fetchEventMap = useCallback(async (ids: UUID[]) => {
     const map = new Map<UUID, DateRow>();
     if (!ids.length) return map;
 
-    // 1) prefer date_requests
-    let rows: any[] = [];
-    try {
-      const { data } = await supabase.from('date_requests').select('*').in('id', ids);
-      rows = data || [];
-    } catch {/* ignore */}
+    const uniq = Array.from(new Set(ids));
 
-    // 2) fallback to dates for any missing ids
-    const found = new Set(rows.map(r => r.id));
-    const missing = ids.filter(id => !found.has(id));
+    // 1) canonical: dates
+    try {
+      const { data: d1 } = await supabase.from('dates').select('*').in('id', uniq);
+      (d1 || []).forEach((row: any) => map.set(row.id, row as DateRow));
+    } catch {}
+
+    // 2) fill gaps from date_requests by date_id
+    const missing = uniq.filter((id) => !map.has(id));
     if (missing.length) {
-      const { data: d2 } = await supabase.from('dates').select('*').in('id', missing);
-      rows = rows.concat(d2 || []);
+      try {
+        const { data: d2 } = await supabase.from('date_requests').select('*').in('date_id', missing);
+        (d2 || []).forEach((row: any) => {
+          const did = row?.date_id;
+          if (did && (row.title || row.event_date || row.location || row.photo_urls || row.cover_image_url)) {
+            if (!map.has(did)) map.set(did, row as DateRow);
+          }
+        });
+      } catch {}
     }
 
-    rows.forEach((row: any) => map.set(row.id, row as DateRow));
     return map;
   }, []);
 
-  const fetchProfilesMap = useCallback(async (ids: UUID[]) => {
+  /**
+   * PROFILES: hydrate like ManageApplicants.
+   * Minimal, schema-safe column list to avoid supabase select errors.
+   */
+  const fetchProfilesHydrated = useCallback(async (byProfileIds: UUID[], byAuthIds: UUID[]) => {
     const map = new Map<UUID, ProfileRow>();
-    const uniq = Array.from(new Set(ids.filter(Boolean)));
-    if (!uniq.length) return map;
-    const { data } = await supabase
-      .from('profiles')
-      .select(
-        'id, screenname, profile_photo, location, latitude, longitude, gender, orientation, about, gallery_photos'
-      )
-      .in('id', uniq);
-    (data || []).forEach((row: any) => map.set(row.id, row));
+
+    const PROFILE_COLS = 'id, screenname, profile_photo, location, gender, orientation, about, gallery_photos';
+
+    const uniqProfile = Array.from(new Set(byProfileIds.filter(Boolean)));
+    const uniqAuth    = Array.from(new Set(byAuthIds.filter(Boolean)));
+
+    // Pass 1: by profiles.id
+    if (uniqProfile.length) {
+      try {
+        const { data } = await supabase.from('profiles').select(PROFILE_COLS).in('id', uniqProfile);
+        (data || []).forEach((row: any) => { map.set(row.id, row as ProfileRow); });
+      } catch {}
+    }
+
+    // Pass 2: by common auth FK columns (map results by FK and by id)
+    let needAuth = uniqAuth.filter((id) => !map.has(id));
+    const authColumns = ['user_id', 'uid', 'auth_id', 'auth_user_id', 'account_id'] as const;
+
+    for (const col of authColumns) {
+      if (!needAuth.length) break;
+      try {
+        const { data } = await supabase.from('profiles').select(`${PROFILE_COLS}, ${col}`).in(col as any, needAuth);
+        (data || []).forEach((row: any) => {
+          if (row[col]) map.set(row[col] as UUID, row as ProfileRow);
+          if (row.id)   map.set(row.id as UUID, row as ProfileRow);
+        });
+        needAuth = needAuth.filter((id) => !map.has(id));
+      } catch {}
+    }
+
     return map;
   }, []);
 
   const fetchAcceptedCounts = useCallback(async (ids: UUID[]) => {
-    // Prefer event_attendees; fallback to legacy accepted invites tally
+    // Authoritative accepted count from date_requests
     const counts = new Map<UUID, number>();
     if (!ids.length) return counts;
 
     try {
       const { data } = await supabase
-        .from('event_attendees')
+        .from('date_requests')
         .select('date_id')
+        .eq('status', 'accepted')
         .in('date_id', ids);
       (data || []).forEach((r: any) => {
         counts.set(r.date_id, (counts.get(r.date_id) ?? 0) + 1);
       });
-    } catch { /* ignore; we'll fallback */ }
-
-    const missing = ids.filter(id => !counts.has(id));
-    if (missing.length) {
-      try {
-        const { data } = await supabase
-          .from('invites')
-          .select('date_id')
-          .eq('status', 'accepted')
-          .in('date_id', missing);
-        (data || []).forEach((r: any) => {
-          counts.set(r.date_id, (counts.get(r.date_id) ?? 0) + 1);
-        });
-      } catch { /* ignore */ }
-    }
+    } catch {}
 
     return counts;
   }, []);
 
-  /* ------------------ detect + query (view or legacy) ------------------ */
+  /* ------------------ detect + query (view first) ------------------ */
 
-  const fetchSentCore = useCallback(async (hostId: UUID) => {
-    // Try new view first (filter by inviter_id or host_id depending on schema)
+  const fetchSentCore = useCallback(async (_hostId: UUID): Promise<{ kind: 'view' | 'dr' | 'invites' | 'none'; pending: PendingCore[] }> => {
+    // 1) v_sent_invites — already scoped by RLS/auth.uid()
     try {
-      // Attempt with inviter_id
-      let q = supabase.from('v_sent_invites').select('*').eq('inviter_id', hostId).order('created_at', { ascending: false });
-      let { data, error } = await q;
-      if (error?.message?.toLowerCase?.().includes('column') || error?.message?.toLowerCase?.().includes('inviter_id')) {
-        // Try fallback column host_id if view uses that name
-        ({ data, error } = await supabase
-          .from('v_sent_invites')
-          .select('*')
-          .eq('host_id', hostId)
-          .order('created_at', { ascending: false }));
-      }
+      const { data, error } = await supabase
+        .from('v_sent_invites')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!error && Array.isArray(data)) {
-        const rows = (data as ViewSentRow[]).filter((r) => {
-          const s = String(r.status ?? 'pending').toLowerCase();
-          return SHOWABLE_STATUSES.has(s);
-        });
-
-        if (rows.length) {
-          return {
-            kind: 'view' as const,
-            pending: rows.map(r => ({
-              req_id: r.req_id,
-              date_id: r.date_id,
-              recipient_id: r.recipient_id,
-              created_at: r.created_at,
+      if (!error && Array.isArray(data) && data.length) {
+        const pending = (data as any[])
+          .map((r) => {
+            const status = String(r.status ?? 'pending').toLowerCase();
+            if (!SHOWABLE_STATUSES.has(status)) return null;
+            const ids = extractRecipientIds(r);
+            const req = readStr(r.req_id ?? r.dr_id ?? r.date_request_id ?? r.id); // view must expose DR id here
+            const did = readStr(r.date_id ?? r.event_id ?? r.date);
+            if (!req || !did || (!ids.profileId && !ids.authId)) return null;
+            return {
+              req_id: req,
+              date_id: did,
+              created_at: (r.created_at || new Date().toISOString()) as string,
+              recipient_profile_id: ids.profileId ?? null,
+              recipient_auth_id: ids.authId ?? null,
               _title: r.title ?? null,
               _event_date: r.event_date ?? null,
               _event_tz: r.event_timezone ?? null,
-            })),
-          };
-        }
+            } as PendingCore;
+          })
+          .filter(Boolean) as PendingCore[];
+
+        if (pending.length) return { kind: 'view', pending };
       }
-    } catch { /* ignore and fall back */ }
+    } catch { /* fall through */ }
 
-    // Legacy: invites I sent and still showable
-    const { data, error } = await supabase
-      .from('invites')
-      .select('id, date_id, inviter_id, invitee_id, status, created_at')
-      .eq('inviter_id', hostId)
-      .in('status', Array.from(SHOWABLE_STATUSES))
-      .order('created_at', { ascending: false });
+    // 2) authoritative fallback: date_requests (host's pending)
+    try {
+      const { data, error } = await supabase
+        .from('date_requests')
+        .select('id, date_id, created_at, recipient_id, title, event_date, event_timezone')
+        .eq('requester_id', _hostId)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false });
 
-    if (error) throw error;
-    const rows = (data ?? []) as InviteRow[];
-    return {
-      kind: 'legacy' as const,
-      pending: rows.map(r => ({
-        req_id: r.id,
-        date_id: r.date_id,
-        recipient_id: r.invitee_id,
-        created_at: r.created_at,
-      })),
-    };
+      if (!error && Array.isArray(data) && data.length) {
+        const pending = (data as any[])
+          .map((r) => {
+            const req = readStr(r.id);
+            const did = readStr(r.date_id);
+            if (!req || !did) return null;
+            return {
+              req_id: req,
+              date_id: did,
+              created_at: (r.created_at || new Date().toISOString()) as string,
+              recipient_profile_id: readStr(r.recipient_id),
+              recipient_auth_id: null,
+              _title: r.title ?? null,
+              _event_date: r.event_date ?? null,
+              _event_tz: r.event_timezone ?? null,
+            } as PendingCore;
+          })
+          .filter(Boolean) as PendingCore[];
+
+        if (pending.length) return { kind: 'dr', pending };
+      }
+    } catch { /* fall through */ }
+
+    // 3) legacy invites (for hydration only; rescind will still try to map to DR)
+    try {
+      const { data } = await supabase
+        .from('invites')
+        .select('*')
+        .eq('inviter_id', _hostId)
+        .order('created_at', { ascending: false });
+
+      if (Array.isArray(data) && data.length) {
+        const pending = (data as any[])
+          .map((r) => {
+            const status = String(r.status ?? 'pending').toLowerCase();
+            if (!SHOWABLE_STATUSES.has(status)) return null;
+            const ids = extractRecipientIds(r);
+            const req = readStr(r.req_id ?? r.id); // this might NOT be the DR id; we'll resolve on rescind
+            const did = readStr(r.date_id);
+            if (!req || !did || (!ids.profileId && !ids.authId)) return null;
+            return {
+              req_id: req,
+              date_id: did,
+              created_at: (r.created_at || new Date().toISOString()) as string,
+              recipient_profile_id: ids.profileId ?? null,
+              recipient_auth_id: ids.authId ?? null,
+            } as PendingCore;
+          })
+          .filter(Boolean) as PendingCore[];
+        if (pending.length) return { kind: 'invites', pending };
+      }
+    } catch {}
+
+    return { kind: 'none', pending: [] };
   }, []);
 
   /* ----------------------------- main fetch ---------------------------- */
 
-  const detachRealtime = useCallback(() => {
-    try { chInvitesSelfRef.current?.unsubscribe(); } catch {}
-    try { chDatesRef.current?.unsubscribe(); } catch {}
-    try { chInvitesDatesRef.current?.unsubscribe(); } catch {}
-    chInvitesSelfRef.current = null;
-    chDatesRef.current = null;
-    chInvitesDatesRef.current = null;
+  const detachChannel = useCallback(() => {
+    try { chHostRef.current?.unsubscribe(); } catch {}
+    chHostRef.current = null;
   }, []);
 
-  const fetchRows = useCallback(async () => {
+  const attachHostDateRequestsRealtime = useCallback((hostId: UUID) => {
+    detachChannel();
+    chHostRef.current = supabase
+      .channel(`sent-invites:${hostId}`)
+      // If a DR for me leaves pending → drop locally (fast)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'date_requests',
+        filter: `requester_id=eq.${hostId}`
+      }, payload => {
+        const newStatus = String(payload.new?.status ?? '').toLowerCase();
+        if (newStatus && newStatus !== 'pending') {
+          setRows(curr => curr.filter(r => r.req_id !== payload.new.id));
+        }
+      })
+      // If a DR is inserted for me in pending → refresh to hydrate joins
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'date_requests',
+        filter: `requester_id=eq.${hostId}`
+      }, () => { fetchRows(false); })
+      // Deletions (rare) → remove
+      .on('postgres_changes', {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'date_requests',
+        filter: `requester_id=eq.${hostId}`
+      }, payload => {
+        setRows(curr => curr.filter(r => r.req_id !== payload.old.id));
+      })
+      .subscribe();
+  }, [detachChannel]);
+
+  const fetchRows = useCallback(async (showSpinner = true) => {
     if (!me) { setRows([]); setLoading(false); setRefreshing(false); return; }
-    if (!refreshing) setLoading(true);
+    if (showSpinner && !refreshing) setLoading(true);
 
     let core: Awaited<ReturnType<typeof fetchSentCore>>;
     try { core = await fetchSentCore(me); } catch (e) {
@@ -435,43 +552,47 @@ const MySentInvitesScreen: React.FC = () => {
     if (!pending.length) {
       setRows([]);
       setLoading(false); setRefreshing(false);
-      detachRealtime();
-      attachInvitesSelfRealtime(me); // still listen so new rows show up
+      attachHostDateRequestsRealtime(me);
       return;
     }
 
-    const dateIds      = Array.from(new Set(pending.map((r) => r.date_id)));
-    const recipientIds = Array.from(new Set(pending.map((r) => r.recipient_id)));
+    const dateIds             = Array.from(new Set(pending.map((r) => r.date_id)));
+    const recipientProfileIds = Array.from(new Set(pending.map((r) => r.recipient_profile_id).filter(Boolean))) as UUID[];
+    const recipientAuthIds    = Array.from(new Set(pending.map((r) => r.recipient_auth_id).filter(Boolean))) as UUID[];
 
     const [eventMap, profileMap, acceptedCounts] = await Promise.all([
-      fetchDateRequestsMap(dateIds),
-      fetchProfilesMap(recipientIds),
+      fetchEventMap(dateIds),
+      fetchProfilesHydrated(recipientProfileIds, recipientAuthIds),
       fetchAcceptedCounts(dateIds),
     ]);
 
     const cleaned: SentItem[] = pending.map((r) => {
-      const d = eventMap.get(r.date_id) as DateRow | undefined;
-      const p = profileMap.get(r.recipient_id) as ProfileRow | undefined;
+      const p: ProfileRow | undefined =
+        (r.recipient_profile_id ? profileMap.get(r.recipient_profile_id) : undefined) ||
+        (r.recipient_auth_id ? profileMap.get(r.recipient_auth_id) : undefined);
 
-      // Build recipient card user
+      const gallery = toStringArray(p?.gallery_photos);
+      const primaryPhoto = p?.profile_photo || (gallery.length ? gallery[0] : null);
       const collapsedOrientation = Array.isArray(p?.orientation)
         ? (p?.orientation[0] as string | undefined)
         : (p?.orientation as string | undefined);
 
       const user = {
-        id: r.recipient_id,
+        id: (p?.id as UUID) || (r.recipient_profile_id as UUID) || (r.recipient_auth_id as UUID),
         screenname: p?.screenname ?? 'Guest',
-        profile_photo: p?.profile_photo ?? null,
+        profile_photo: primaryPhoto ?? null,
         location: p?.location ?? undefined,
-        latitude: p?.latitude ?? undefined,
-        longitude: p?.longitude ?? undefined,
+        latitude: undefined,
+        longitude: undefined,
         gender: p?.gender ?? null,
         orientation: collapsedOrientation ?? null,
         about: p?.about ?? null,
-        gallery_photos: Array.isArray(p?.gallery_photos) ? (p?.gallery_photos as string[]) : [],
+        gallery_photos: gallery,
       };
 
-      // compute "full" safely
+      const d = eventMap.get(r.date_id) as DateRow | undefined;
+
+      // capacity/full calc
       let full = false;
       const rgc = parseRemainingCounts(d?.remaining_gender_counts);
       if (rgc && Object.keys(rgc).length > 0) {
@@ -486,13 +607,12 @@ const MySentInvitesScreen: React.FC = () => {
         ? isPastLocalEndOfDay(d.event_date, (d as any)?.event_timezone ?? null)
         : false;
 
-      // date tag photo
+      // cover image for DateTag
       let datePhoto: string | null = null;
       if ((d as any)?.cover_image_url) datePhoto = String((d as any).cover_image_url);
       else if (Array.isArray(d?.photo_urls) && d!.photo_urls!.length) datePhoto = String(d!.photo_urls![0]);
       else if (d?.profile_photo) datePhoto = String(d.profile_photo);
 
-      // location (avoid rendering WKT blobs)
       const cleanLoc =
         (d?.location && !looksLikeWKTOrHex(d.location) ? d.location : null) ||
         (d as any)?.location_str ||
@@ -501,15 +621,16 @@ const MySentInvitesScreen: React.FC = () => {
       return {
         req_id: r.req_id,
         date_id: r.date_id,
-        recipient_id: r.recipient_id,
         created_at: r.created_at,
+
+        recipient_profile_id: r.recipient_profile_id ?? null,
+        recipient_auth_id: r.recipient_auth_id ?? null,
 
         user,
 
-        // prefer DB title; if view hinted a title/date/tz, use those when missing
-        date_title: (d?.title ?? (r as any)?._title ?? null) as string | null,
-        event_date: (d?.event_date ?? (r as any)?._event_date ?? null) as string | null,
-        event_timezone: ((d as any)?.event_timezone ?? (r as any)?._event_tz ?? null) as string | null,
+        date_title: (d?.title ?? r._title ?? null) as string | null,
+        event_date: (d?.event_date ?? r._event_date ?? null) as string | null,
+        event_timezone: ((d as any)?.event_timezone ?? r._event_tz ?? null) as string | null,
         date_location: cleanLoc,
         date_photo_url: datePhoto,
 
@@ -521,28 +642,24 @@ const MySentInvitesScreen: React.FC = () => {
         expired,
       } as SentItem;
     })
-    // only show invites that are still relevant
     .filter((it) => !it.full && !it.expired);
 
-    // Sort newest first (created_at desc)
     cleaned.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
 
     setRows(cleaned);
     setLoading(false);
     setRefreshing(false);
 
-    // realtime watchers
-    attachInvitesSelfRealtime(me);     // legacy & some views source invites here
-    attachDateRequestsRealtime(dateIds);
-    attachInvitesForDatesRealtime(dateIds);
+    // realtime watcher (single, lean)
+    attachHostDateRequestsRealtime(me);
   }, [
     me,
     refreshing,
     fetchSentCore,
-    fetchDateRequestsMap,
-    fetchProfilesMap,
+    fetchEventMap,
+    fetchProfilesHydrated,
     fetchAcceptedCounts,
-    detachRealtime,
+    attachHostDateRequestsRealtime,
   ]);
 
   const onRefresh = useCallback(() => {
@@ -550,65 +667,16 @@ const MySentInvitesScreen: React.FC = () => {
     fetchRows();
   }, [fetchRows]);
 
-  /* ---------------------------- realtime bindings --------------------------- */
-
-  const attachInvitesSelfRealtime = useCallback((viewer: string) => {
-    try { chInvitesSelfRef.current?.unsubscribe(); } catch {}
-    chInvitesSelfRef.current = supabase
-      .channel('my_sent_invites_self_legacy_rx')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'invites', filter: `inviter_id=eq.${viewer}` },
-        () => { fetchRows(); }
-      )
-      .subscribe(() => {});
-  }, [fetchRows]);
-
-  const attachDateRequestsRealtime = useCallback((ids: UUID[]) => {
-    try { chDatesRef.current?.unsubscribe(); } catch {}
-    if (!ids.length) { chDatesRef.current = null; return; }
-    const idList = ids.join(',');
-    chDatesRef.current = supabase
-      .channel('my_sent_invites_date_requests_rx')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'date_requests', filter: `id=in.(${idList})` },
-        () => { fetchRows(); }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'date_requests', filter: `id=in.(${idList})` },
-        () => { fetchRows(); }
-      )
-      .subscribe(() => {});
-  }, [fetchRows]);
-
-  const attachInvitesForDatesRealtime = useCallback((ids: UUID[]) => {
-    try { chInvitesDatesRef.current?.unsubscribe(); } catch {}
-    if (!ids.length) { chInvitesDatesRef.current = null; return; }
-    const idList = ids.join(',');
-    chInvitesDatesRef.current = supabase
-      .channel('my_sent_invites_dates_invites_rx')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'invites', filter: `date_id=in.(${idList})` },
-        () => { fetchRows(); }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'invites', filter: `date_id=in.(${idList})` },
-        () => { fetchRows(); }
-      )
-      .subscribe(() => {});
-  }, [fetchRows]);
-
   // first mount + focus refresh
   useEffect(() => {
     (async () => { await fetchRows(); })();
-    return () => detachRealtime();
-  }, [fetchRows, detachRealtime]);
+    return () => detachChannel();
+  }, [fetchRows, detachChannel]);
 
-  useFocusEffect(useCallback(() => { fetchRows(); return () => {}; }, [fetchRows]));
+  useFocusEffect(React.useCallback(() => {
+    fetchRows();
+    return () => {};
+  }, [fetchRows]));
 
   // prune locally (handles crossing midnight in event TZ without server events)
   useEffect(() => {
@@ -618,63 +686,85 @@ const MySentInvitesScreen: React.FC = () => {
     return () => clearInterval(t);
   }, []);
 
-  /* --------------------------- navigation helpers --------------------------- */
-
-  const openProfile = useCallback((userId: string) => {
-    try {
-      navigation.navigate('PublicProfile' as never, { userId, origin: 'MySentInvites' } as never);
-    } catch {
-      try { navigation.navigate('Profile' as never, { userId, origin: 'MySentInvites' } as never); } catch {}
-    }
-  }, [navigation]);
-
-  const goToDateFeed = useCallback(() => {
-    try { navigation.navigate('DateFeed' as never); } catch {}
-  }, [navigation]);
-
-  const goToMyDates = useCallback(() => {
-    const candidates = ['MyDates', 'My DrYnks', 'MyDatesScreen', 'MyDatesTab'];
-    for (const name of candidates) {
-      try { navigation.navigate(name as never); return; } catch {}
-    }
-    goToDateFeed();
-  }, [navigation, goToDateFeed]);
-
   /* -------------------------------- actions -------------------------------- */
 
-  const rescindInvite = useCallback(async (row: SentItem) => {
-    // Newer stack: invites are the source of truth for "sent" items.
-    // We mark the invite as revoked; if your DB uses a stored procedure, call it here instead.
+  const resolveDateRequestIdIfNeeded = useCallback(async (row: SentItem): Promise<UUID | null> => {
+    // If the req_id is already a DR id (typical via view/dr fallback), use it:
+    if (row.req_id && row.req_id.length >= 8) return row.req_id;
+
+    // Otherwise, find the matching DR row by (host, date_id, recipient)
+    const candidates: UUID[] = [];
+    if (row.recipient_profile_id) candidates.push(row.recipient_profile_id);
+    if (row.user?.id && !candidates.includes(row.user.id)) candidates.push(row.user.id);
+
     try {
-      const { error } = await supabase
-        .from('invites')
-        .update({ status: 'revoked' })
-        .eq('id', row.req_id);
-      if (error) throw error;
+      const { data, error } = await supabase
+        .from('date_requests')
+        .select('id')
+        .eq('requester_id', me!)
+        .eq('date_id', row.date_id)
+        .eq('status', 'pending')
+        .in('recipient_id', candidates.length ? candidates : ['00000000-0000-0000-0000-000000000000'])
+        .limit(1);
+      if (error) return null;
+      return Array.isArray(data) && data[0]?.id ? (data[0].id as UUID) : null;
+    } catch {
+      return null;
+    }
+  }, [me]);
 
-      // Optimistic remove
-      setRows((prev) => prev.filter((r) => r.req_id !== row.req_id));
+  const onRescind = useCallback(async (row: SentItem) => {
+    if (!me) return;
+    if (busyReqId) return;
+    setBusyReqId(row.req_id);
 
-      // Notify invitee (bell/push if configured)
+    // Optimistic remove from UI
+    setRows(prev => prev.filter(r => r.req_id !== row.req_id));
+
+    try {
+      // 1) Try RPC with the req_id we have (typical)
+      let { error } = await supabase.rpc('invites_decide', {
+        p_req_id: row.req_id,
+        p_decision: 'rescinded',
+      });
+
+      // 2) If that failed (e.g., legacy row), resolve DR id and try again
+      if (error) {
+        const resolved = await resolveDateRequestIdIfNeeded(row);
+        if (!resolved) throw error;
+        const { error: e2 } = await supabase.rpc('invites_decide', {
+          p_req_id: resolved,
+          p_decision: 'rescinded',
+        });
+        if (e2) throw e2;
+      }
+
+      // Fire-and-forget UX notification (optional)
       try {
         await notifyInviteRevoked({
-          recipientId: row.recipient_id,
+          recipientId: String(row.recipient_profile_id || row.user.id),
           dateId: row.date_id,
           eventTitle: row.date_title ?? 'your invite',
         });
       } catch {}
-
     } catch (e: any) {
-      console.error('[MySentInvites] revoke error', e);
-      Alert.alert('Could not rescind invite', e?.message || 'Try again later.');
+      // If RPC says not-pending, the other side already acted; keep it pruned.
+      const msg = String(e?.message || '').toLowerCase();
+      if (!msg.includes('not-pending')) {
+        Alert.alert('Could not rescind', e?.message || 'Please try again.');
+        // best effort re-sync
+        await fetchRows(false);
+      }
+    } finally {
+      setBusyReqId(null);
     }
-  }, []);
+  }, [me, busyReqId, resolveDateRequestIdIfNeeded, fetchRows]);
 
   /* ------------------------------ guarded UI ------------------------------- */
 
   if (loading) {
     return (
-     <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
+      <AppShell headerTitle={headerTitle} showBack currentTab="My DrYnks">
         <View style={styles.centered}><ActivityIndicator /></View>
       </AppShell>
     );
@@ -700,10 +790,10 @@ const MySentInvitesScreen: React.FC = () => {
           <Text style={styles.emptyTitle}>No sent invites yet.</Text>
           <Text style={styles.emptySub}>Invite friends from your date card, or browse dates to get started.</Text>
           <View style={styles.emptyCtasRow}>
-            <TouchableOpacity onPress={goToMyDates} style={[styles.ctaBtn, { backgroundColor: DRYNKS_BLUE }]}>
+            <TouchableOpacity onPress={() => { try { navigation.navigate('MyDates' as never); } catch { try { navigation.navigate('My DrYnks' as never); } catch {} } }} style={[styles.ctaBtn, { backgroundColor: DRYNKS_BLUE }]}>
               <Text style={styles.ctaBtnText}>My Dates</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={goToDateFeed} style={[styles.ctaBtn, { backgroundColor: DRYNKS_RED }]}>
+            <TouchableOpacity onPress={() => { try { navigation.navigate('DateFeed' as never); } catch {} }} style={[styles.ctaBtn, { backgroundColor: DRYNKS_RED }]}>
               <Text style={styles.ctaBtnText}>Browse Dates</Text>
             </TouchableOpacity>
           </View>
@@ -720,7 +810,9 @@ const MySentInvitesScreen: React.FC = () => {
         contentContainerStyle={{ padding: 16, paddingBottom: 24, paddingTop: 4 }}
         ListHeaderComponent={
           <View style={styles.instructions}>
-            <Text style={styles.instructionsText}>Tap <Text style={{ fontWeight: '800' }}>Rescind</Text> on a card to cancel that invite</Text>
+            <Text style={styles.instructionsText}>
+              Tap <Text style={{ fontWeight: '800' }}>Rescind</Text> on a card to cancel that invite
+            </Text>
           </View>
         }
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -743,7 +835,7 @@ const MySentInvitesScreen: React.FC = () => {
                       disabled={disabled}
                     />
                   </View>
-                  <RescindButton onPress={() => rescindInvite(item)} />
+                  <RescindButton onPress={() => onRescind(item)} disabled={busyReqId === item.req_id} />
                 </View>
 
                 <ProfileCard
@@ -752,9 +844,9 @@ const MySentInvitesScreen: React.FC = () => {
                   origin="MySentInvites"
                   invited
                   onInvite={() => {}}
-                  onPressProfile={() => openProfile(item.user.id)}
-                  onNamePress={() => openProfile(item.user.id)}
-                  onAvatarPress={() => openProfile(item.user.id)}
+                  onPressProfile={() => { try { navigation.navigate('PublicProfile' as never, { userId: item.user.id, origin: 'MySentInvites' } as never); } catch {} }}
+                  onNamePress={() => { try { navigation.navigate('PublicProfile' as never, { userId: item.user.id, origin: 'MySentInvites' } as never); } catch {} }}
+                  onAvatarPress={() => { try { navigation.navigate('PublicProfile' as never, { userId: item.user.id, origin: 'MySentInvites' } as never); } catch {} }}
                 />
               </View>
             </View>

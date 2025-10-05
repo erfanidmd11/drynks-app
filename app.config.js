@@ -56,7 +56,7 @@ const expoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'com.drynks.app',
-    buildNumber: '2025091715',
+    buildNumber: '2025091716',
     usesAppleSignIn: true,
 
     // Keep these in config (plugin also adds them; duplicates are de-duped).
