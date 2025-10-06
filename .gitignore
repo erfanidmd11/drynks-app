@@ -59,3 +59,4 @@ echo "supabase/.secrets" >> .gitignore
 
 # macOS
 .DS_Store
+PR_BODY.md
