@@ -53,3 +53,9 @@ Supabase/.temp/
 
 echo "supabase/.secrets" >> .gitignore
 .expo/
+# Local env
+.env
+.env.*
+
+# macOS
+.DS_Store
