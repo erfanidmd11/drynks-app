@@ -1,13 +1,62 @@
 // src/services/NotificationService.ts
-// Crash-safe (iOS18/RN0.74) notifications service:
-// - No top-level imports of expo-notifications / expo-device (lazy-loaded).
-// - Never imports expo-notifications on iOS if the plugin is not present.
-// - Honors EXPO_PUBLIC_DISABLE_PUSH kill switch.
-// - Idempotent init; safe on cold start; no early listeners.
+// Crash-safe notifications + tab-aware deep linking for DrYnks
+// - Lazy imports for expo-notifications / expo-device (safe on iOS without plugin)
+// - Single source of truth for navigation targets (tabs + screens)
+// - All pushes and "bell" rows carry a normalized nav payload: { tab, screen, params }
+// - Backwards compatible with legacy { screen, params } consumers
 
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { supabase } from '@config/supabase';
+
+// ─────────────────────────────────────────────────────────────
+// 0) ROUTING CONFIG — adjust to your actual Navigator route names
+//    These are the defaults inferred from the project structure you shared.
+//    If any route name differs in your app, update ONLY this block.
+// ─────────────────────────────────────────────────────────────
+export const NAV = {
+  ROOT_TABS: 'RootTabs', // your <BottomTabNavigator> route name
+  TABS: {
+    HOME: 'Home',
+    DATES: 'Dates',
+    MESSAGES: 'Messages',
+    PROFILE: 'Profile',
+  },
+  SCREENS: {
+    // Dates cluster
+    RECEIVED_INVITES: 'ReceivedInvites',        // "Received Invites page"
+    MY_SENT_INVITES: 'MySentInvites',           // src/screens/Dates/MySentInvitesScreen.tsx
+    JOIN_REQUESTS: 'JoinRequests',              // src/screens/Dates/JoinRequestsScreen.tsx
+    DATE_DETAILS: 'DateDetails',
+
+    // Messages cluster
+    MESSAGES_HOME: 'MessagesHome',              // Tab landing / thread list
+    GROUP_CHAT: 'GroupChat',                    // Optional deep target (kept for legacy)
+  },
+} as const;
+
+export type TabKey = typeof NAV.TABS[keyof typeof NAV.TABS];
+
+export type NavTarget = {
+  tab?: TabKey;          // Which bottom tab to focus
+  screen?: string;       // Nested screen under that tab (optional)
+  params?: Record<string, any> | undefined; // Params to pass
+};
+
+// Helper to build nested navigate args for React Navigation
+// Usage: const [name, params] = buildNavigateArgs(target); navigation.navigate(name, params);
+export function buildNavigateArgs(target?: NavTarget): [string, any?] {
+  const t = target ?? {};
+  if (t.tab) {
+    const params = t.screen
+      ? { screen: t.tab, params: { screen: t.screen, params: t.params } } // Tabs -> Stack screen
+      : { screen: t.tab };
+    return [NAV.ROOT_TABS, params];
+  }
+  if (t.screen) return [t.screen, t.params];
+  // Fallback: open Messages tab (safe default)
+  return [NAV.ROOT_TABS, { screen: NAV.TABS.MESSAGES }];
+}
 
 // ───────────────── Kill-switch ─────────────────
 const RAW_FLAG =
@@ -20,7 +69,6 @@ export const PUSH_DISABLED =
   (typeof RAW_FLAG === 'string' && RAW_FLAG.toLowerCase() === 'true');
 
 // ────────────── Detect if the plugin is baked in ──────────────
-// If 'expo-notifications' is not listed in app.config plugins, don't import it.
 function notificationsPluginPresent(): boolean {
   const plugins = (Constants?.expoConfig as any)?.plugins ?? [];
   if (!Array.isArray(plugins)) return false;
@@ -29,7 +77,6 @@ function notificationsPluginPresent(): boolean {
     return name === 'expo-notifications';
   });
 }
-
 const NOTIFS_PLUGIN_PRESENT = notificationsPluginPresent();
 
 // ───────────────── Lazy module loaders ─────────────────
@@ -41,7 +88,6 @@ let DeviceMod: DeviceNS | null = null;
 
 async function getNotifications(): Promise<NotificationsNS | null> {
   try {
-    // Hard gate: if push is disabled, or we're on iOS without the plugin, never import.
     if (PUSH_DISABLED) return null;
     if (Platform.OS === 'ios' && !NOTIFS_PLUGIN_PRESENT) return null;
     if (!Notifs) Notifs = await import('expo-notifications');
@@ -61,20 +107,23 @@ async function getDevice(): Promise<DeviceNS | null> {
 }
 
 // ───────────────── Types ─────────────────
-export type Handler = NonNullable<NotificationsNS['setNotificationHandler']>;
 export type NotificationType =
   | 'invite_received'
   | 'invite_revoked'
-  | 'invite_accepted'
+  | 'invite_accepted'         // accepted BY ME (user is invitee)
+  | 'invite_accepted_host'    // accepted OF MY INVITE (user is host)
   | 'join_request_received'
   | 'join_request_accepted'
   | 'generic';
 
 export type DrYnksPushData =
-  | { type: 'INVITE_RECEIVED'; date_id: string; invite_id?: string }
-  | { type: 'INVITE_REVOKED';  date_id: string; invite_id?: string }
-  | { type: 'INVITE_ACCEPTED'; date_id: string; invite_id?: string }
-  | { type: 'JOIN_REQUEST';    date_id: string; request_id?: string }
+  | { type: 'INVITE_RECEIVED'; date_id: string; invite_id?: string; nav?: NavTarget }
+  | { type: 'INVITE_REVOKED';  date_id: string; invite_id?: string; nav?: NavTarget }
+  | { type: 'INVITE_ACCEPTED'; date_id: string; invite_id?: string; nav?: NavTarget }        // invitee view
+  | { type: 'INVITE_ACCEPTED_HOST'; date_id: string; invite_id?: string; nav?: NavTarget }   // host view
+  | { type: 'JOIN_REQUEST';     date_id: string; request_id?: string; nav?: NavTarget }
+  | { type: 'JOIN_REQUEST_ACCEPTED'; date_id: string; request_id?: string; nav?: NavTarget }
+  | { type: 'CHAT_MESSAGE';     date_id: string; message_id?: string | null; nav?: NavTarget }
   | { [k: string]: any };
 
 type RegisterResult = { token?: string; error?: string };
@@ -94,7 +143,6 @@ function chunk<T>(arr: T[], size: number): T[][] {
 function nowISO() { return new Date().toISOString(); }
 
 function getProjectId(): string | undefined {
-  // Prefer EAS projectId
   const fromExtra = (Constants?.expoConfig as any)?.extra?.eas?.projectId;
   const fromEas = (Constants as any)?.easConfig?.projectId;
   const fromExpoCfg = (Constants?.expoConfig as any)?.projectId; // newer SDKs
@@ -111,7 +159,6 @@ export const registerForPushNotificationsAsync = async (): Promise<RegisterResul
     if (!Notifs || !Device) return { error: 'unavailable' };
 
     if (!Device.isDevice) {
-      // Physical device required for push
       return { error: 'not_a_device' };
     }
 
@@ -248,8 +295,33 @@ export async function insertBellNotification(
   type: NotificationType,
   data: Record<string, any>
 ) {
-  const { error } = await supabase.from('notifications').insert({ user_id: userId, type, data });
+  const payload = normalizeBellData(data);
+  const { error } = await supabase.from('notifications').insert({ user_id: userId, type, data: payload });
   if (error) throw error;
+}
+
+// Backward-compatible write shape: always include both modern {nav} and legacy {screen, params}
+function normalizeBellData(data: Record<string, any>): Record<string, any> {
+  const nav: NavTarget | undefined = data?.nav ?? inferNavFromLegacy(data);
+  const legacy = toLegacyShape(nav);
+  return { ...data, nav, ...legacy };
+}
+
+function inferNavFromLegacy(data: any): NavTarget | undefined {
+  if (!data) return undefined;
+  if (data.nav) return data.nav;
+  if (typeof data.screen === 'string') {
+    return { screen: data.screen, params: data.params };
+  }
+  return undefined;
+}
+
+function toLegacyShape(nav?: NavTarget) {
+  if (!nav) return {};
+  return {
+    screen: nav.screen, // legacy consumers may ignore the tab, but still navigate
+    params: nav.params,
+  };
 }
 
 export async function markNotificationsReadFor(userId: string) {
@@ -322,7 +394,7 @@ async function serverNotify(
   if (PUSH_DISABLED) return true;
   try {
     const { error } = await supabase.functions.invoke('push', {
-      body: { action: 'notify', userId, title, body, data, bell },
+      body: { action: 'notify', userId, title, body, data, bell: bell ? { ...bell, data: normalizeBellData(bell.data) } : undefined },
     });
     if (error) throw error;
     return true;
@@ -347,6 +419,8 @@ async function serverNotify(
 }
 
 // ─────────────────── High-level helpers ────────────────────
+// NOTE: All helpers now write tab-aware nav targets in both push.data.nav and bell.data.nav
+
 export async function sendPushToUser(
   userId: string,
   title: string,
@@ -356,60 +430,100 @@ export async function sendPushToUser(
   await serverNotify(userId, title, body, data);
 }
 
-// Convenience wrappers you already use
+// Invite received → Received Invites page (Dates tab)
 export async function notifyInviteReceived(params: {
   recipientId: string; dateId: string; hostUsername: string; eventTitle: string; eventTimeISO?: string;
 }) {
   const { recipientId, dateId, hostUsername, eventTitle, eventTimeISO } = params;
-  const bellData = { screen: 'DateDetails', params: { dateId }, meta: { eventTitle, eventTimeISO } };
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.RECEIVED_INVITES };
+  const bellData = { nav, meta: { dateId, eventTitle, eventTimeISO } };
   await serverNotify(
     recipientId,
     `New invite from ${hostUsername}`,
     `You're invited to: ${eventTitle}`,
-    { type: 'INVITE_RECEIVED', date_id: dateId },
+    { type: 'INVITE_RECEIVED', date_id: dateId, nav },
     { type: 'invite_received', data: bellData }
   );
 }
 
+// Invite rescinded → My Sent Invites (Dates tab)
 export async function notifyInviteRevoked(params: {
   recipientId: string; dateId: string; eventTitle: string;
 }) {
   const { recipientId, dateId, eventTitle } = params;
-  const bellData = { screen: 'MyInvites', params: undefined, meta: { dateId, eventTitle } };
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.MY_SENT_INVITES };
+  const bellData = { nav, meta: { dateId, eventTitle } };
   await serverNotify(
     recipientId,
     'Invite rescinded',
     `The host rescinded: ${eventTitle}`,
-    { type: 'INVITE_REVOKED', date_id: dateId },
+    { type: 'INVITE_REVOKED', date_id: dateId, nav },
     { type: 'invite_revoked', data: bellData }
   );
 }
 
+// I (invitee) was accepted → could go to Date Details or ReceivedInvites; keeping intent: celebrate acceptance.
+// If you prefer opening a different screen, adjust NAV.SCREENS.* or swap nav below.
 export async function notifyInviteAccepted(params: {
   acceptedUserId: string; dateId: string; eventTitle: string;
 }) {
   const { acceptedUserId, dateId, eventTitle } = params;
-  const bellData = { screen: 'DateDetails', params: { dateId }, meta: { eventTitle } };
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.DATE_DETAILS, params: { dateId } };
+  const bellData = { nav, meta: { eventTitle } };
   await serverNotify(
     acceptedUserId,
     'You were accepted! 🎉',
     `You're in for: ${eventTitle}`,
-    { type: 'INVITE_ACCEPTED', date_id: dateId },
+    { type: 'INVITE_ACCEPTED', date_id: dateId, nav },
     { type: 'invite_accepted', data: bellData }
   );
 }
 
+// HOST view: someone accepted an invite I sent → Manage/My Sent Invites (Dates tab)
+export async function notifyInviteAcceptedHost(params: {
+  hostId: string; dateId: string; accepterUsername: string; eventTitle: string;
+}) {
+  const { hostId, dateId, accepterUsername, eventTitle } = params;
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.MY_SENT_INVITES };
+  const bellData = { nav, meta: { dateId, eventTitle, accepterUsername } };
+  await serverNotify(
+    hostId,
+    'Invite accepted',
+    `${accepterUsername} accepted your invite for: ${eventTitle}`,
+    { type: 'INVITE_ACCEPTED_HOST', date_id: dateId, nav },
+    { type: 'invite_accepted', data: bellData } // uses same bell type for badge filtering
+  );
+}
+
+// Join request arrived → Join Requests screen (Dates tab)
 export async function notifyJoinRequestReceived(params: {
   hostId: string; dateId: string; requesterUsername: string; eventTitle: string;
 }) {
   const { hostId, dateId, requesterUsername, eventTitle } = params;
-  const bellData = { screen: 'JoinRequests', params: undefined, meta: { dateId, eventTitle } };
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.JOIN_REQUESTS };
+  const bellData = { nav, meta: { dateId, eventTitle, requesterUsername } };
   await serverNotify(
     hostId,
     'New join request',
     `${requesterUsername} wants to join: ${eventTitle}`,
-    { type: 'JOIN_REQUEST', date_id: dateId },
+    { type: 'JOIN_REQUEST', date_id: dateId, nav },
     { type: 'join_request_received', data: bellData }
+  );
+}
+
+// Join request accepted (notify requester) → Join Requests screen (Dates tab) or Date Details
+export async function notifyJoinRequestAccepted(params: {
+  requesterId: string; dateId: string; eventTitle: string;
+}) {
+  const { requesterId, dateId, eventTitle } = params;
+  const nav: NavTarget = { tab: NAV.TABS.DATES, screen: NAV.SCREENS.JOIN_REQUESTS };
+  const bellData = { nav, meta: { dateId, eventTitle } };
+  await serverNotify(
+    requesterId,
+    'Request accepted',
+    `You're in for: ${eventTitle}`,
+    { type: 'JOIN_REQUEST_ACCEPTED', date_id: dateId, nav },
+    { type: 'join_request_accepted', data: bellData }
   );
 }
 
@@ -437,7 +551,6 @@ export async function initNotificationsOnce(): Promise<void> {
   if (_initialized || PUSH_DISABLED) return;
   _initialized = true;
 
-  // On iOS without plugin, do nothing.
   if (Platform.OS === 'ios' && !NOTIFS_PLUGIN_PRESENT) return;
 
   try {
@@ -451,13 +564,11 @@ export async function initNotificationsOnce(): Promise<void> {
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
+/* ───────────────────────────────────────────────────────────
    CHAT MESSAGE PUSH — server-first (Edge Function), client fallback
-   Call this right after inserting into public.chat_messages.
-   data payload opens GroupChat via AppNavigator (route 'GroupChat', dateId).
-────────────────────────────────────────────────────────────────────────── */
+   NOW routes to the Messages tab (tab-safe), not a detached screen.
+────────────────────────────────────────────────────────── */
 
-/** Load all chat member user_ids for a date (creator + accepted_users). */
 async function getChatMemberIds(dateId: string): Promise<string[]> {
   try {
     const { data, error } = await supabase
@@ -479,8 +590,8 @@ async function getChatMemberIds(dateId: string): Promise<string[]> {
 }
 
 /**
- * Fire a push for a new chat message. Uses Edge Function 'notify_chat_members' if present.
- * Falls back to client-side fan-out to all chat members (except sender).
+ * Fire a push for a new chat message.
+ * Data payload points at the Messages tab (safe) and includes dateId for context.
  */
 export async function sendPushForMessage(input: {
   dateId: string;
@@ -511,11 +622,12 @@ export async function sendPushForMessage(input: {
     const recipients = members.filter((uid) => uid && uid !== input.senderId);
     if (!recipients.length) return;
 
-    const payload = {
+    const nav: NavTarget = { tab: NAV.TABS.MESSAGES, screen: NAV.SCREENS.MESSAGES_HOME, params: { dateId: input.dateId } };
+    const payload: DrYnksPushData = {
       type: 'CHAT_MESSAGE',
-      route: 'GroupChat',
-      dateId: input.dateId,
-      messageId: input.messageId ?? null,
+      date_id: input.dateId,
+      message_id: input.messageId ?? null,
+      nav,
     };
 
     // Gather tokens
@@ -525,13 +637,12 @@ export async function sendPushForMessage(input: {
       toks.forEach((t) => tokenList.push(t));
     }
     if (!tokenList.length) {
-      // At least ensure bell shows a badge
+      // At least ensure bell shows a badge and carries nav
       await Promise.all(
         recipients.map((uid) =>
           insertBellNotification(uid, 'generic', {
-            screen: 'GroupChat',
-            params: { dateId: input.dateId },
-            meta: { preview: input.text },
+            nav,
+            meta: { preview: input.text, dateId: input.dateId },
           })
         )
       );
@@ -548,17 +659,41 @@ export async function sendPushForMessage(input: {
     const { badTokens } = await sendExpoPush(msgs);
     if (badTokens.length) await pruneInvalidTokens(badTokens);
 
-    // Mirror bell notifications
+    // Mirror bell notifications (with tab-aware nav)
     await Promise.all(
       recipients.map((uid) =>
         insertBellNotification(uid, 'generic', {
-          screen: 'GroupChat',
-          params: { dateId: input.dateId },
-          meta: { preview: input.text },
+          nav,
+          meta: { preview: input.text, dateId: input.dateId },
         })
       )
     );
   } catch (err) {
     console.warn('[ChatPush] fallback fan-out failed:', (err as any)?.message || err);
   }
+}
+
+// ────────────────────────── NAV RESOLVERS ──────────────────────────
+// Use these in your UI handlers to open the correct tab+screen
+
+export function getNavFromPushData(data?: DrYnksPushData | Record<string, any> | null): NavTarget {
+  if (!data) return { tab: NAV.TABS.MESSAGES };
+  // Prefer explicit nav
+  if ((data as any)?.nav) return (data as any).nav as NavTarget;
+
+  // Legacy keys
+  if (typeof (data as any)?.route === 'string' && (data as any).route === NAV.SCREENS.GROUP_CHAT) {
+    return { tab: NAV.TABS.MESSAGES, screen: NAV.SCREENS.MESSAGES_HOME, params: { dateId: (data as any)?.dateId } };
+  }
+  if (typeof (data as any)?.screen === 'string') {
+    return { screen: (data as any).screen, params: (data as any).params };
+  }
+  return { tab: NAV.TABS.MESSAGES };
+}
+
+export function getNavFromBellData(bellData?: any): NavTarget {
+  if (!bellData) return { tab: NAV.TABS.MESSAGES };
+  if (bellData.nav) return bellData.nav as NavTarget;
+  if (typeof bellData.screen === 'string') return { screen: bellData.screen, params: bellData.params };
+  return { tab: NAV.TABS.MESSAGES };
 }

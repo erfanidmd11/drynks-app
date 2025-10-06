@@ -1,37 +1,39 @@
 // babel.config.js
 module.exports = function (api) {
-  // Decide "prod" without relying solely on api.env
+  // Treat EAS builds as production and cache per mode
   const isProd =
     process.env.NODE_ENV === 'production' ||
     process.env.APP_ENV === 'production' ||
     process.env.EAS_BUILD === 'true';
 
-  // Cache by our explicit env flag (forces rebuild when you change it)
+  // Cache based on mode so changes to NODE_ENV/EAS_BUILD re-evaluate
   api.cache.using(() => (isProd ? 'prod' : 'dev'));
 
   const plugins = [
-    // Path aliases (must match your tsconfig.json "paths" if you use TypeScript)
+    // Path aliases — keep in sync with tsconfig.json "paths"
     [
       'module-resolver',
       {
         root: ['./'],
         extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
         alias: {
-          '@components': './src/components',
-          '@screens': './src/screens',
-          '@config': './src/config',
-          '@utils': './src/utils',
+          '@': './src',
           '@assets': './assets',
+          '@components': './src/components',
+          '@config': './src/config',
           '@hooks': './src/hooks',
-          '@services': './src/services',
           '@navigation': './src/navigation',
+          '@screens': './src/screens',
+          '@services': './src/services',
           '@state': './src/state',
           '@types': './types',
+          '@utils': './src/utils',
         },
       },
     ],
 
     // import { SUPABASE_URL } from '@env'
+    // (inlines variables at build time; allowUndefined prevents hard failures in dev/Go)
     [
       'dotenv-import',
       {
@@ -43,21 +45,17 @@ module.exports = function (api) {
     ],
   ];
 
-  // Strip console.* in production, but keep warn/error
+  // Strip console.* in production/EAS builds (keep warn/error)
   if (isProd) {
     plugins.push(['transform-remove-console', { exclude: ['error', 'warn'] }]);
   }
 
-  // Reanimated plugin MUST be last
-  try {
-    require.resolve('react-native-reanimated/plugin');
-    plugins.push('react-native-reanimated/plugin');
-  } catch {
-    // plugin not installed — skip (useful for web-only builds or CI)
-  }
+  // ⚠️ MUST be last for Reanimated v3+
+  plugins.push('react-native-worklets/plugin');
 
   return {
     presets: ['babel-preset-expo'],
     plugins,
+    compact: isProd, // Metro also minifies, but this is fine
   };
 };

@@ -131,7 +131,9 @@ const MessagesScreen: React.FC = () => {
     );
 
     const items: ThreadItem[] = rows.map((r) => {
-      const last = r.chat_messages?.at(-1);
+      const last = r.chat_messages && r.chat_messages.length
+        ? r.chat_messages[r.chat_messages.length - 1]
+        : undefined;
       const participants: string[] = [
         ...(r.creator ? [namesById.get(r.creator) || ''] : []),
         ...(Array.isArray(r.accepted_users)

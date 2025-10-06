@@ -43,7 +43,7 @@ function genScreenname(email?: string | null, uid?: string) {
 
 /**
  * Ensure a minimal profile row exists for the authenticated user.
- * Idempotent. Satisfies NOT NULL(screenname). Keep RLS policy to allow
+ * Idempotent. Satisfies NOT NULL(screenname). Keep RLS to allow
  * insert when auth.uid() = id.
  */
 async function ensureProfileRow() {
@@ -75,7 +75,7 @@ async function ensureProfileRow() {
   });
 
   if (insErr) {
-    // Don't hard-fail signup here; log and continue. Update below will still try.
+    // Don't block onboarding here; log and continue.
     console.log('[SignupStepTwo] ensureProfileRow insert error:', insErr);
   }
 }
@@ -84,7 +84,7 @@ async function ensureProfileRow() {
  * Format typing to MM/DD/YYYY as the user enters digits.
  */
 function maskDobInput(input: string, set: (s: string) => void) {
-  const digits = input.replace(/[^\d]/g, '');
+  const digits = input.replace(/[^\d]/g, '').slice(0, 8); // at most 8 digits
   let out = '';
   if (digits.length <= 2) out = digits;
   else if (digits.length <= 4) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
@@ -97,9 +97,11 @@ function maskDobInput(input: string, set: (s: string) => void) {
  * No use of Date.toISOString() to avoid timezone rollovers.
  */
 function toISODate(mmddyyyy: string): string | null {
-  const m = Number(mmddyyyy.split('/')[0]);
-  const d = Number(mmddyyyy.split('/')[1]);
-  const y = Number(mmddyyyy.split('/')[2]);
+  const parts = mmddyyyy.split('/');
+  if (parts.length !== 3) return null;
+  const m = Number(parts[0]);
+  const d = Number(parts[1]);
+  const y = Number(parts[2]);
   if (!m || !d || !y || y < 1900 || y > 2100) return null;
   if (m < 1 || m > 12) return null;
 
@@ -114,7 +116,7 @@ function calcAge(iso: string): number {
   const [Y, M, D] = iso.split('-').map(Number);
   const today = new Date();
   let age = today.getFullYear() - Y;
-  const mDiff = today.getMonth() + 1 - M;
+  const mDiff = (today.getMonth() + 1) - M;
   const dDiff = today.getDate() - D;
   if (mDiff < 0 || (mDiff === 0 && dDiff < 0)) age -= 1;
   return age;
@@ -201,13 +203,20 @@ const SignupStepTwo: React.FC = () => {
 
     const age = calcAge(iso);
     if (age < 18) {
+      // Optional: put underage users into a waitlist table
       try {
         const { data: auth } = await supabase.auth.getUser();
-        const email = auth?.user?.email;
+        const email = auth?.user?.email || null;
         if (email) {
-          await supabase.from('waitlist_underage').insert({ email, birthdate: iso }).catch(() => {});
+          const { error: wlErr } = await supabase
+            .from('waitlist_underage')
+            .insert({ email, birthdate: iso });
+          if (wlErr) console.log('[SignupStepTwo] underage waitlist insert error:', wlErr);
         }
-      } catch {}
+      } catch (e) {
+        console.log('[SignupStepTwo] underage waitlist write error:', e);
+      }
+
       Alert.alert(
         'Almost There 🥲',
         'DrYnks is 18+ only. We’ll save you a spot and toast you on your birthday! 🎉'
@@ -274,7 +283,13 @@ const SignupStepTwo: React.FC = () => {
               blurOnSubmit
             />
 
-            <OnboardingNavButtons onNext={handleNext} onBack={handleBack} />
+            {/* Only pass onNext; do not pass onBack unless your component supports it */}
+            <OnboardingNavButtons onNext={handleNext} />
+            {/* If you want a back button here, use your screen header or add a Back below:
+                <View style={{ marginTop: 12 }}>
+                  <Button title="Back" onPress={handleBack} />
+                </View>
+            */}
           </View>
         </TouchableWithoutFeedback>
       </KeyboardAvoidingView>

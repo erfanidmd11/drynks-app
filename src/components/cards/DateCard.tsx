@@ -2,6 +2,9 @@
 // Production-ready, context-aware DateCard.
 // Keeps your original features (cover resolver, gallery typing, idempotent join_requests),
 // and adds context-driven actions (accept/decline/leave/cancel/chat) with swipe gestures.
+//
+// FIX: "Invite In‑App" now creates real invites in `public.date_requests` (and best-effort mirror
+// into legacy `public.invites`) so My Sent Invites / Received Invites screens populate correctly.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -19,13 +22,14 @@ import {
   Share,
   ToastAndroid,
 } from 'react-native';
-import { Swipeable } from 'react-native-gesture-handler'; // standardized import
+import { Swipeable } from 'react-native-gesture-handler';
 import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
 import StatusBadge from '@components/common/StatusBadge';
-import { createShareInviteLink } from '@services/InviteLinks'; // single-use invite link API
+import { createShareInviteLink } from '@services/InviteLinks';
+import { notifyHost as notifyHostEdge } from '@services/notifyHost';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const H_PADDING = 12;
@@ -57,7 +61,7 @@ type InviteRow = {
     | 'cancelled'
     | 'removed_by_host'
     | 'date_cancelled';
-  inviter_id?: string | null; // naming hygiene (your table uses inviter_id)
+  inviter_id?: string | null;
   invitee_id?: string | null;
 };
 
@@ -141,7 +145,7 @@ const ageFromBirthdate = (birthdate?: string | null) => {
 
 const getProfileId = (p: any) => p?.id || p?.profile_id || p?.user_id || p?.userId || p?.uid || null;
 const getCreatorIdFromDate = (date: any) =>
-  date?.creator_id || date?.creator || date?.creator || getProfileId(date?.creator_profile) || null;
+  date?.creator_id || date?.creator || getProfileId(date?.creator_profile) || null;
 
 /** Map various key shapes to our 3 labels */
 const canonGenderKey = (g?: any): 'Male' | 'Female' | 'TS' | null => {
@@ -191,17 +195,15 @@ async function resolveSupabaseUrlAuto(pathOrUrl?: string | null): Promise<string
   // If looks like "bucket/path"
   if (/^[^/]+\/[^/].+/.test(s)) {
     const firstSlash = s.indexOf('/');
-    theBucket: {
-      const bucket = s.slice(0, firstSlash);
-      const objectPath = s.slice(firstSlash + 1);
-      try {
-        const { data, error } = await supabase.storage.from(bucket).createSignedUrl(objectPath, 3600);
-        if (!error && data?.signedUrl) return data.signedUrl;
-        const pub = supabase.storage.from(bucket).getPublicUrl(objectPath);
-        return pub?.data?.publicUrl ?? null;
-      } catch {
-        // ignore and fall through
-      }
+    const bucket = s.slice(0, firstSlash);
+    const objectPath = s.slice(firstSlash + 1);
+    try {
+      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(objectPath, 3600);
+      if (!error && data?.signedUrl) return data.signedUrl;
+      const pub = supabase.storage.from(bucket).getPublicUrl(objectPath);
+      return pub?.data?.publicUrl ?? null;
+    } catch {
+      // ignore and fall through
     }
   }
 
@@ -597,11 +599,11 @@ const DateCard: React.FC<DateCardProps> = ({
   // Prefer ManageApplicants; fallback to other potential route names; last resort open chat
   const smartManageNavigate = (dateId: string) => {
     const candidates = [
-      { name: 'ManageApplicants', params: { dateId } }, // primary route in your AppNavigator
+      { name: 'ManageApplicants', params: { dateId } },
       { name: 'ManageParticipants', params: { dateId } },
       { name: 'Participants', params: { dateId } },
       { name: 'ManageAttendees', params: { dateId } },
-      { name: 'GroupChat', params: { dateId } }, // last-resort fallback
+      { name: 'GroupChat', params: { dateId } },
     ];
     for (const c of candidates) {
       try {
@@ -679,9 +681,92 @@ const DateCard: React.FC<DateCardProps> = ({
 
   const showDots = gallery.length > 1;
 
+  /* -------------------------- NEW invite helpers (core) -------------------------- */
+
+  /** Create or revive (to pending) a host→recipient invite for this date. */
+  async function ensureInviteRow(recipientId: string) {
+    const dateId = String(date?.id || '');
+    if (!dateId) throw new Error('Missing date id');
+    if (!userId) throw new Error('Missing host user id');
+    if (recipientId === userId) throw new Error('You cannot invite yourself.');
+
+    // NEW FLOW: date_requests (authoritative)
+    {
+      const { data: existing, error } = await supabase
+        .from('date_requests')
+        .select('id,status')
+        .eq('date_id', dateId)
+        .eq('requester_id', userId)      // host
+        .eq('recipient_id', recipientId) // invitee
+        .limit(1);
+
+      if (error) throw error;
+
+      if (!Array.isArray(existing) || existing.length === 0) {
+        const { error: insErr } = await supabase.from('date_requests').insert([{
+          date_id: dateId,
+          requester_id: userId,
+          recipient_id: recipientId,
+          status: 'pending',
+        }]);
+        if (insErr) throw insErr;
+      } else if (existing[0].status !== 'pending') {
+        await supabase.from('date_requests').update({ status: 'pending' }).eq('id', existing[0].id);
+      }
+    }
+
+    // LEGACY mirror (best-effort; swallow errors)
+    try {
+      const { data: existLegacy } = await supabase
+        .from('invites')
+        .select('id,status')
+        .eq('date_id', dateId)
+        .eq('inviter_id', userId)
+        .eq('invitee_id', recipientId)
+        .limit(1);
+
+      if (!Array.isArray(existLegacy) || existLegacy.length === 0) {
+        await supabase.from('invites').insert([{
+          date_id: dateId,
+          inviter_id: userId,
+          invitee_id: recipientId,
+          status: 'pending',
+        }]);
+      } else if (existLegacy[0].status !== 'pending') {
+        await supabase.from('invites').update({ status: 'pending' }).eq('id', existLegacy[0].id);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function inviteUserInApp(recipient: { id: string; screenname?: string | null }) {
+    // Create/ensure rows, then notify same as your previous UX
+    await ensureInviteRow(recipient.id);
+
+    try {
+      await supabase.from('notifications').insert([
+        {
+          user_id: recipient.id,
+          message: `${date.creator_profile?.screenname || 'Someone'} invited you to "${date.title}"`,
+          screen: 'ReceivedInvites', // more direct than MyDates
+          params: { date_id: date.id, action: 'invite_inapp' },
+        },
+      ]);
+    } catch {
+      // not critical
+    }
+
+    Alert.alert('✅ Invite sent to ' + (recipient.screenname || 'user'));
+    setUsername('');
+    setUserSuggestions([]);
+    setDropdownClosedByTap(true);
+  }
+
   /* ------------------------------ server actions ----------------------------- */
 
-  const notifyHost = async (msg: string) => {
+  // Local (in-app) notification entry to your notifications table (host)
+  const notifyHostLocal = async (msg: string) => {
     try {
       const creator_id = getCreatorIdFromDate(date);
       if (!creator_id || creator_id === userId) return;
@@ -724,16 +809,27 @@ const DateCard: React.FC<DateCardProps> = ({
         requester_id: String(userId),
         status: 'pending',
       };
-      if (creator_id) payload.recipient_id = String(creator_id); // trigger also enforces this
+      if (creator_id) payload.recipient_id = String(creator_id);
 
-      const { error } = await supabase.from('join_requests').insert([payload]);
+      // Insert & return ids so we can notify reliably
+      const { data: jrRow, error } = await supabase
+        .from('join_requests')
+        .insert([payload])
+        .select('date_id, requester_id')
+        .single();
+
       if (error) throw error;
 
       await AsyncStorage.setItem(`requested_${dateId}`, 'true');
       setRequested(true);
       Alert.alert('🎉 Date Requested', 'Check My Join Requests to follow up.');
       onAccept && onAccept();
-      await notifyHost('💌 You have a join request on your date.');
+
+      // Local log + Edge function (email via Resend)
+      await notifyHostLocal('💌 You have a join request on your date.');
+      if (jrRow?.date_id && jrRow?.requester_id) {
+        await notifyHostEdge(jrRow.date_id, jrRow.requester_id, 'requested');
+      }
     } catch (e: any) {
       let msg = e?.message || 'Could not submit your request.';
       if (e?.code === '23505') {
@@ -772,6 +868,9 @@ const DateCard: React.FC<DateCardProps> = ({
         p_decision: 'accepted',
       });
       if (error) throw error;
+
+      // Notify host (email via Resend); UI note handled below
+      await notifyHostEdge(String(date?.id), String(userId), 'accepted');
 
       const suppress = await AsyncStorage.getItem('suppress_move_to_accepted_toast');
       if (!suppress) {
@@ -827,6 +926,10 @@ const DateCard: React.FC<DateCardProps> = ({
           try {
             const { error } = await supabase.rpc('dates_leave', { p_date_id: date.id });
             if (error) throw error;
+
+            // Notify host that you left
+            await notifyHostEdge(String(date?.id), String(userId), 'cancelled');
+
             onChanged?.('removed', { reason: 'left' });
           } catch (e: any) {
             Alert.alert('Could not leave', e?.message || 'Please try again.');
@@ -1024,7 +1127,8 @@ const DateCard: React.FC<DateCardProps> = ({
 
   const renderItem = ({ item }: { item: any }) => {
     const p = item.profile;
-    const pid = getProfileId(p); // maintain consistent typing
+    const pid = getProfileId(p);
+    
     const imgUri = item.type === 'event' ? item.url : p?.profile_photo;
 
     const handleSlidePress =
@@ -1080,27 +1184,27 @@ const DateCard: React.FC<DateCardProps> = ({
           </View>
 
           <FlatList
-            ref={flatListRef}
-            horizontal
-            pagingEnabled
-            data={gallery}
-            keyExtractor={(_, i) => `g-${i}`}
-            renderItem={renderItem}
-            snapToAlignment="start"
-            decelerationRate={Platform.OS === 'ios' ? 'fast' : 0.98}
-            showsHorizontalScrollIndicator={false}
-            snapToInterval={CARD_WIDTH}
-            getItemLayout={(_, index) => ({
-              length: CARD_WIDTH,
-              offset: CARD_WIDTH * index,
-              index,
-            })}
-            onScroll={(e) => {
-              const idx = Math.round(e.nativeEvent.contentOffset.x / CARD_WIDTH);
-              if (idx !== currentIndex) setCurrentIndex(idx);
-            }}
-            scrollEventThrottle={16}
-          />
+  ref={flatListRef}
+  horizontal
+  pagingEnabled
+  data={gallery}
+  keyExtractor={(_, i) => `g-${i}`}
+  renderItem={renderItem}
+  snapToAlignment="start"
+  decelerationRate={Platform.OS === 'ios' ? 'fast' : 0.98}
+  showsHorizontalScrollIndicator={false}
+  snapToInterval={CARD_WIDTH}
+  getItemLayout={(_, index) => ({
+    length: CARD_WIDTH,
+    offset: CARD_WIDTH * index,
+    index,
+  })}
+  onScroll={(e) => {
+    const idx = Math.round(e.nativeEvent.contentOffset.x / CARD_WIDTH);
+    if (idx !== currentIndex) setCurrentIndex(idx);
+  }}
+  scrollEventThrottle={16}
+/>
         </View>
 
         {showDots && (
@@ -1196,7 +1300,7 @@ const DateCard: React.FC<DateCardProps> = ({
           </View>
         )}
 
-        {/* Invite Friends (kept feature for discoverability) */}
+        {/* Invite Friends */}
         <TouchableOpacity
           onPress={() => {
             if (onInviteFriends) onInviteFriends();
@@ -1227,22 +1331,10 @@ const DateCard: React.FC<DateCardProps> = ({
                 <TouchableOpacity
                   key={u.id}
                   onPress={() => {
-                    (async () => {
-                      try {
-                        await supabase.from('notifications').insert([
-                          {
-                            user_id: u.id,
-                            message: `${date.creator_profile?.screenname || 'Someone'} invited you to "${date.title}"`,
-                            screen: 'MyDates',
-                            params: { date_id: date.id, action: 'invite_inapp' },
-                          },
-                        ]);
-                        Alert.alert('✅ Invite sent to ' + u.screenname);
-                        setUsername(''); setUserSuggestions([]); setDropdownClosedByTap(true);
-                      } catch (err: any) {
-                        Alert.alert('Error sending invite', err.message || String(err));
-                      }
-                    })();
+                    // ✅ Create a real invite (date_requests) + mirror + notify
+                    inviteUserInApp(u).catch((err) =>
+                      Alert.alert('Error sending invite', err?.message || String(err))
+                    );
                   }}
                   style={styles.suggestionRow}
                 >

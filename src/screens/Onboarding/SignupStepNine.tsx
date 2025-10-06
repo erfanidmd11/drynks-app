@@ -1,7 +1,7 @@
-// src/screens/Onboarding/SignupStepNine.tsx
-// Step 9 — Location (server-first hydrate, draft cache, Places autocomplete + geocoding)
+// Step 9 — Location (server-first hydrate, draft cache)
+// Autocomplete rendered in a top-level Modal portal (cannot be clipped by parents)
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,70 +15,417 @@ import {
   Keyboard,
   TouchableOpacity,
   ActivityIndicator,
-  FlatList,
+  Modal,
+  Dimensions,
 } from 'react-native';
 import * as Location from 'expo-location';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { supabase } from '@config/supabase';
+import { v4 as uuidv4 } from 'uuid';
+import { Ionicons } from '@expo/vector-icons';
+
 import AnimatedScreenWrapper from '../../components/common/AnimatedScreenWrapper';
 import OnboardingNavButtons from '../../components/common/OnboardingNavButtons';
-import { v4 as uuidv4 } from 'uuid';
+import { supabase } from '@config/supabase';
 import { loadDraft, saveDraft } from '@utils/onboardingDraft';
+import { GOOGLE_PLACES_KEY as GOOGLE_KEY, HAS_PLACES, PLACES_COUNTRIES } from '@config/env';
 
-// ---- Brand colors (ONE source of truth) ----
+// ---- Brand colors ----
 const DRYNKS_RED = '#E34E5C';
 const DRYNKS_BLUE = '#232F39';
 const DRYNKS_GRAY = '#F1F4F7';
 const DRYNKS_WHITE = '#FFFFFF';
+const PLACEHOLDER = '#4B5563';
 
+// Convenience quick‑picks (UX only; does NOT restrict global search)
 const popularCities = [
   'Los Angeles', 'Miami', 'Boston', 'New York', 'Philadelphia',
   'San Jose', 'San Francisco', 'San Diego', 'Las Vegas',
-  'Chicago', 'Dallas', 'Austin', 'Atlanta',
+  'Chicago', 'Dallas', 'Austin', 'Atlantic City',
 ];
 
-// Try EXPO_PUBLIC_ first (Expo best practice), then plain env as fallback
-const GOOGLE_KEY =
-  (process.env as any)?.EXPO_PUBLIC_GOOGLE_API_KEY ||
-  (process.env as any)?.GOOGLE_API_KEY ||
-  '';
+// ---------- Autocomplete helpers (same as Create Date) ----------
+type PlaceSuggestion = { place_id: string; description: string };
+type PlaceSelection = { name: string; latitude: number; longitude: number };
+const MIN_QUERY_LEN = 3;
 
-const COUNTRIES: string[] = String(
-  (process.env as any)?.EXPO_PUBLIC_PLACES_COUNTRIES || 'us,ca'
-)
-  .split(',')
-  .map((c) => c.trim().toLowerCase())
-  .filter(Boolean);
-
-type Suggestion = {
-  description: string;
-  place_id: string;
-};
-
-const AUTOCOMPLETE_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
-const DETAILS_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/details/json';
-
-// Small utility: debounce via setTimeout
-function useDebouncedValue<T>(value: T, delay = 250) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
-
-// Heuristic to keep "city-like" predictions when we must query without types
 function isCityPrediction(p: any): boolean {
   const t: string[] = Array.isArray(p?.types) ? p.types : [];
   if (t.includes('locality')) return true;
   if (t.includes('administrative_area_level_3') || t.includes('administrative_area_level_2')) return true;
-  // Fallback: descriptions with "City, State/Region"
-  const commas = String(p?.description || '').split(',').length - 1;
+  const desc: string = String(p?.description || '');
+  const commas = desc.split(',').length - 1;
   return commas >= 1 && !t.includes('establishment');
 }
 
+function labelFromAddressComponents(r: any) {
+  const comps: any[] = r?.address_components || [];
+  const locality = comps.find((c: any) => c.types.includes('locality'))?.long_name;
+  const admin1 = comps.find((c: any) => c.types.includes('administrative_area_level_1'))?.short_name;
+  const country = comps.find((c: any) => c.types.includes('country'))?.short_name;
+  return [locality, admin1, country].filter(Boolean).join(', ') || r?.formatted_address || r?.name;
+}
+
+/** Portal-based autocomplete to avoid zIndex/overflow clipping. */
+const LocationAutocomplete: React.FC<{
+  value: string;
+  onChangeText: (v: string) => void;
+  onSelect: (sel: PlaceSelection) => void;
+}> = ({ value, onChangeText, onSelect }) => {
+  const inputRef = useRef<TextInput>(null);
+  const insets = useSafeAreaInsets();
+  const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRef = useRef<string>(uuidv4());
+  const screen = Dimensions.get('window');
+
+  const canAutocomplete = HAS_PLACES;
+  const resetSession = () => { sessionRef.current = uuidv4(); };
+
+  const measure = useCallback(() => {
+    // Run twice to dodge initial 0,0 on some Android layouts
+    requestAnimationFrame(() => {
+      inputRef.current?.measureInWindow?.((x, y, w, h) => {
+        if (w && h) {
+          setAnchor({ x, y, w, h });
+        } else {
+          setTimeout(() => {
+            inputRef.current?.measureInWindow?.((x2, y2, w2, h2) => {
+              if (w2 && h2) setAnchor({ x: x2, y: y2, w: w2, h: h2 });
+            });
+          }, 50);
+        }
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (open) measure();
+  }, [open, measure, value]);
+
+  useEffect(() => {
+    if (!canAutocomplete) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const query = value.trim();
+    if (query.length < MIN_QUERY_LEN) {
+      setSuggestions([]);
+      setOpen(false);
+      return;
+    }
+
+    setOpen(true); // show spinner while querying
+
+    debounceRef.current = setTimeout(async () => {
+      const sessiontoken = sessionRef.current;
+      const components =
+        PLACES_COUNTRIES.length > 0 ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
+      const common =
+        `input=${encodeURIComponent(query)}&language=en&key=${GOOGLE_KEY}` +
+        `&sessiontoken=${sessiontoken}&locationbias=ipbias${components}`;
+
+      try {
+        setLoading(true);
+
+        // A) Autocomplete with cities
+        let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}&types=(cities)`;
+        let res = await fetch(url);
+        let json = await res.json();
+
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places A] status:', json?.status, json?.error_message);
+        }
+
+        if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
+          const items = json.predictions.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          setSuggestions(items);
+          setOpen(items.length > 0);
+          return;
+        }
+
+        // A2) Regions (some accounts return better city-like hits here)
+        url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}&types=(regions)`;
+        res = await fetch(url);
+        json = await res.json();
+
+        if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
+          const filtered = json.predictions.filter(isCityPrediction);
+          const items = filtered.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          if (items.length) {
+            setSuggestions(items);
+            setOpen(true);
+            return;
+          }
+        }
+
+        // B) General autocomplete, filter to cities
+        url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${common}`;
+        res = await fetch(url);
+        json = await res.json();
+
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places B] status:', json?.status, json?.error_message);
+        }
+
+        if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
+          const filtered = json.predictions.filter(isCityPrediction);
+          const items = filtered.map((p: any) => ({ place_id: p.place_id, description: p.description }));
+          if (items.length > 0) {
+            setSuggestions(items);
+            setOpen(true);
+            return;
+          }
+        }
+
+        // C) Find Place from Text (textquery)
+        url =
+          `https://maps.googleapis.com/maps/api/place/findplacefromtext/json` +
+          `?input=${encodeURIComponent(query)}` +
+          `&inputtype=textquery` +
+          `&fields=place_id,formatted_address,name,geometry` +
+          `&key=${GOOGLE_KEY}` +
+          `&sessiontoken=${sessiontoken}`;
+        res = await fetch(url);
+        json = await res.json();
+
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places C - FindPlace] status:', json?.status, json?.error_message);
+        }
+
+        if (json?.status === 'OK' && Array.isArray(json?.candidates) && json.candidates.length) {
+          const items = json.candidates.map((c: any) => ({
+            place_id: c.place_id,
+            description: c.formatted_address || c.name,
+          }));
+          setSuggestions(items);
+          setOpen(items.length > 0);
+          return;
+        }
+
+        // D) Geocode fallback (use as a single suggestion)
+        url =
+          `https://maps.googleapis.com/maps/api/geocode/json` +
+          `?address=${encodeURIComponent(query)}` +
+          `&key=${GOOGLE_KEY}`;
+        res = await fetch(url);
+        json = await res.json();
+
+        if (__DEV__ && json?.status !== 'OK') {
+          console.warn('[Places D - Geocode] status:', json?.status, json?.error_message);
+        }
+
+        if (json?.status === 'OK' && Array.isArray(json?.results) && json.results.length) {
+          const r = json.results[0];
+          const label = labelFromAddressComponents(r);
+          const loc = r.geometry?.location;
+          if (label && loc?.lat != null && loc?.lng != null) {
+            setSuggestions([{ place_id: `geo:${loc.lat},${loc.lng}`, description: label }]);
+            setOpen(true);
+            return;
+          }
+        }
+
+        // Nothing worked
+        setSuggestions([]);
+        setOpen(false);
+      } catch (e) {
+        if (__DEV__) console.warn('[Places ERROR]', e);
+        setSuggestions([]);
+        setOpen(false);
+      } finally {
+        setLoading(false);
+      }
+    }, 300);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [value, canAutocomplete]);
+
+  const selectFromGeoPseudo = (place_id: string) => {
+    const coords = place_id.replace('geo:', '').split(',');
+    const lat = parseFloat(coords[0]);
+    const lng = parseFloat(coords[1]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      onSelect({ name: value.trim(), latitude: lat, longitude: lng });
+      setOpen(false);
+      setSuggestions([]);
+      resetSession();
+      Keyboard.dismiss();
+    }
+  };
+
+  const fetchPlace = async (place_id: string) => {
+    if (place_id.startsWith('geo:')) {
+      selectFromGeoPseudo(place_id);
+      return;
+    }
+    try {
+      const url =
+        `https://maps.googleapis.com/maps/api/place/details/json` +
+        `?place_id=${encodeURIComponent(place_id)}` +
+        `&fields=geometry,address_components,formatted_address,name` +
+        `&sessiontoken=${sessionRef.current}` +
+        `&key=${GOOGLE_KEY}`;
+      const res = await fetch(url);
+      const json = await res.json();
+
+      if (__DEV__ && json?.status !== 'OK') {
+        console.warn('[Places Details] status:', json?.status, json?.error_message);
+      }
+
+      const r = json?.result;
+      const lat = r?.geometry?.location?.lat;
+      const lng = r?.geometry?.location?.lng;
+      const label = labelFromAddressComponents(r);
+
+      if (typeof lat === 'number' && typeof lng === 'number') {
+        onSelect({ name: label, latitude: lat, longitude: lng });
+        setOpen(false);
+        setSuggestions([]);
+        resetSession();
+        Keyboard.dismiss();
+      }
+    } catch (e) {
+      if (__DEV__ && e) console.warn('[Places Details ERROR]', e);
+    }
+  };
+
+  return (
+    <>
+      <TextInput
+        ref={inputRef}
+        value={value}
+        onLayout={measure}
+        onChangeText={(t) => {
+          onChangeText(t);
+          if (t.trim().length >= MIN_QUERY_LEN) setOpen(true);
+          if (t.trim().length === 0) {
+            setSuggestions([]);
+            setOpen(false);
+          }
+        }}
+        placeholder="Enter your city (e.g., Seattle)"
+        placeholderTextColor={PLACEHOLDER}
+        style={styles.input}
+        autoCapitalize="words"
+        autoCorrect={false}
+        returnKeyType="done"
+        onFocus={() => {
+          measure();
+          if (suggestions.length > 0) setOpen(true);
+        }}
+      />
+
+      {/* Own line: Use current location */}
+      <TouchableOpacity
+        onPress={async () => {
+          try {
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') {
+              Alert.alert('Permission required', 'We need location permission to use your current location.');
+              return;
+            }
+            const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+            const { latitude, longitude } = pos.coords;
+            const geos = await Location.reverseGeocodeAsync({ latitude, longitude });
+            const g = geos?.[0];
+            const city = [g?.city || g?.subregion, g?.region, g?.country].filter(Boolean).join(', ');
+            onChangeText(city);
+            onSelect({ name: city, latitude, longitude });
+            setOpen(false);
+            setSuggestions([]);
+            resetSession();
+          } catch {
+            Alert.alert('Error', 'Could not fetch current location.');
+          }
+        }}
+        style={styles.locFullBtn}
+        accessibilityLabel="Choose My Current Location"
+        activeOpacity={0.9}
+      >
+        <Ionicons name="location" size={16} color={DRYNKS_BLUE} />
+        <Text style={styles.locBtnText}>Choose My Current Location</Text>
+      </TouchableOpacity>
+
+      {/* PORTAL: anchored dropdown in a transparent Modal */}
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
+        {/* click anywhere to close */}
+        <TouchableWithoutFeedback onPress={() => setOpen(false)}>
+          <View style={StyleSheet.absoluteFill} />
+        </TouchableWithoutFeedback>
+
+        {/* If measure isn't ready yet, show a safe fallback box below the notch */}
+        <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
+          <View
+            style={[
+              styles.portalBox,
+              anchor && anchor.w && anchor.h
+                ? {
+                    top: Math.min(anchor.y + anchor.h + 4, screen.height - 320),
+                    left: Math.max(8, anchor.x),
+                    width: Math.max(260, Math.min(screen.width - 16, anchor.w)),
+                  }
+                : {
+                    top: Math.max(insets.top + 96, 96),
+                    left: 12,
+                    width: screen.width - 24,
+                  },
+            ]}
+          >
+            {loading ? (
+              <View style={styles.suggestionItem}>
+                <ActivityIndicator size="small" color={DRYNKS_BLUE} />
+                <Text style={{ marginLeft: 8, color: '#6b7280' }}>Searching…</Text>
+              </View>
+            ) : suggestions.length === 0 ? (
+              <View style={styles.suggestionItem}>
+                <Text style={{ color: '#6b7280' }}>No matches</Text>
+              </View>
+            ) : (
+              <>
+                {suggestions.map((s) => (
+                  <TouchableOpacity
+                    key={s.place_id}
+                    onPress={() => fetchPlace(s.place_id)}
+                    style={styles.suggestionItem}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="location-outline" size={16} color="#6B7280" />
+                    <Text numberOfLines={1} style={styles.suggestionText}>
+                      {s.description}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+                {HAS_PLACES && (
+                  <View style={styles.poweredBy}>
+                    <Text style={styles.poweredText}>Powered by Google</Text>
+                  </View>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {!HAS_PLACES && (
+        <Text style={{ color: '#9AA4AF', marginTop: 6 }}>
+          Autocomplete disabled (missing EXPO_PUBLIC_GOOGLE_API_KEY)
+        </Text>
+      )}
+    </>
+  );
+};
+
+// ---------- Screen ----------
 const SignupStepNine: React.FC = () => {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -91,15 +438,6 @@ const SignupStepNine: React.FC = () => {
     longitude: null,
   });
   const [hydrated, setHydrated] = useState(false);
-  const [me, setMe] = useState<{ id: string; email: string } | null>(null);
-
-  // Autocomplete state
-  const [sessionToken] = useState<string>(uuidv4()); // one per screen/session (recommended)
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [loadingSuggest, setLoadingSuggest] = useState(false);
-  const [openDropdown, setOpenDropdown] = useState(false);
-  const debouncedQuery = useDebouncedValue(locationName, 300);
-  const hasPlaces = useMemo(() => !!GOOGLE_KEY, []);
   const scrollRef = useRef<ScrollView | null>(null);
 
   // ---------- Hydrate from server first, then local draft ----------
@@ -108,9 +446,6 @@ const SignupStepNine: React.FC = () => {
       try {
         const { data: u } = await supabase.auth.getUser();
         const uid = u?.user?.id || null;
-        const email = u?.user?.email || null;
-        if (uid && email) setMe({ id: uid, email });
-
         if (uid) {
           const { data: prof } = await supabase
             .from('profiles')
@@ -152,97 +487,6 @@ const SignupStepNine: React.FC = () => {
     }).catch(() => {});
   }, [locationName, coords, hydrated]);
 
-  // ---------- Suggestion search (3+ characters) ----------
-  useEffect(() => {
-    const q = debouncedQuery?.trim();
-    if (!hasPlaces) {
-      // Fallback: simple prefix match against popular cities (still shows a dropdown)
-      if (q && q.length >= 3) {
-        const matches = popularCities
-          .filter((c) => c.toLowerCase().startsWith(q.toLowerCase()))
-          .slice(0, 6)
-          .map((c, i) => ({ description: c, place_id: `local-${i}-${c}` }));
-        setSuggestions(matches);
-        setOpenDropdown(matches.length > 0);
-      } else {
-        setSuggestions([]);
-        setOpenDropdown(false);
-      }
-      return;
-    }
-
-    if (!q || q.length < 3) {
-      setSuggestions([]);
-      setOpenDropdown(false);
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoadingSuggest(true);
-
-        const components =
-          COUNTRIES.length > 0 ? `&components=${COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
-        const common = `input=${encodeURIComponent(q)}&language=en&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}&locationbias=ipbias${components}`;
-
-        // Try with types=(cities) first
-        let url = `${AUTOCOMPLETE_ENDPOINT}?${common}&types=(cities)`;
-        let res = await fetch(url);
-        let json = await res.json();
-
-        let items: Suggestion[] = [];
-        if (json?.status === 'OK' && Array.isArray(json?.predictions) && json.predictions.length) {
-          items = json.predictions.map((p: any) => ({
-            description: p.description,
-            place_id: p.place_id,
-          }));
-        } else {
-          // Fallback: retry without types, then filter to city-like predictions
-          url = `${AUTOCOMPLETE_ENDPOINT}?${common}`;
-          res = await fetch(url);
-          json = await res.json();
-          if (json?.status === 'OK' && Array.isArray(json?.predictions)) {
-            const filtered = json.predictions.filter(isCityPrediction);
-            items = filtered.map((p: any) => ({
-              description: p.description,
-              place_id: p.place_id,
-            }));
-          }
-        }
-
-        if (cancelled) return;
-
-        if (items.length > 0) {
-          setSuggestions(items);
-          setOpenDropdown(true);
-        } else {
-          // As a final UX nicety, show populars matching the prefix
-          const matches = popularCities
-            .filter((c) => c.toLowerCase().startsWith(q.toLowerCase()))
-            .slice(0, 6)
-            .map((c, i) => ({ description: c, place_id: `local-${i}-${c}` }));
-          setSuggestions(matches);
-          setOpenDropdown(matches.length > 0);
-        }
-      } catch (e) {
-        // Network/key issues: fallback to local matches
-        const matches = popularCities
-          .filter((c) => c.toLowerCase().startsWith(q!.toLowerCase()))
-          .slice(0, 6)
-          .map((c, i) => ({ description: c, place_id: `local-${i}-${c}` }));
-        setSuggestions(matches);
-        setOpenDropdown(matches.length > 0);
-      } finally {
-        if (!cancelled) setLoadingSuggest(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedQuery, sessionToken, hasPlaces]);
-
   const handleUseCurrentLocation = async () => {
     try {
       const fg = await Location.requestForegroundPermissionsAsync();
@@ -250,91 +494,74 @@ const SignupStepNine: React.FC = () => {
         Alert.alert('Permission needed', 'Please enable Location permission in Settings.');
         return;
       }
-      const loc = await Location.getCurrentPositionAsync({});
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       const { latitude, longitude } = loc.coords;
       const geo = await Location.reverseGeocodeAsync({ latitude, longitude });
       const city = geo?.[0]?.city || geo?.[0]?.subregion || geo?.[0]?.region || '';
 
       setLocationName(city);
       setCoords({ latitude, longitude });
-      setOpenDropdown(false);
-      setSuggestions([]);
-    } catch (err) {
+      Keyboard.dismiss();
+    } catch {
       Alert.alert('Location Error', 'Could not fetch current location.');
     }
   };
 
-  const geocodeCityFallback = async (city: string) => {
+  const handleCityQuickPick = async (city: string) => {
+    // Quick-pick tiles still resolve globally (Places or device geocoder)
     try {
-      const results = await Location.geocodeAsync(city);
-      if (results?.length) {
-        setCoords({
-          latitude: results[0].latitude,
-          longitude: results[0].longitude,
-        });
-      }
-    } catch {
-      // ignore; user can still proceed with just the name
-    }
-  };
-
-  const resolvePlaceDetails = async (place_id: string, nameFromSuggestion?: string) => {
-    if (!hasPlaces || place_id.startsWith('local-')) {
-      if (nameFromSuggestion) await geocodeCityFallback(nameFromSuggestion);
-      return;
-    }
-    try {
-      const url = `${DETAILS_ENDPOINT}?place_id=${encodeURIComponent(
-        place_id
-      )}&fields=geometry,name&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json?.status === 'OK' && json?.result?.geometry?.location) {
-        const { lat, lng } = json.result.geometry.location;
-        setCoords({ latitude: lat, longitude: lng });
-      } else if (nameFromSuggestion) {
-        await geocodeCityFallback(nameFromSuggestion);
-      }
-    } catch {
-      if (nameFromSuggestion) await geocodeCityFallback(nameFromSuggestion);
-    }
-  };
-
-  const handleSuggestionPress = async (s: Suggestion) => {
-    setLocationName(s.description);
-    setOpenDropdown(false);
-    setSuggestions([]);
-    await resolvePlaceDetails(s.place_id, s.description);
-    setTimeout(() => scrollRef.current?.scrollToEnd?.({ animated: true }), 150);
-  };
-
-  const handleCityPress = async (city: string) => {
-    setLocationName(city);
-    setOpenDropdown(false);
-    setSuggestions([]);
-    if (hasPlaces) {
-      try {
+      setLocationName(city);
+      if (HAS_PLACES) {
         const comps =
-          COUNTRIES.length > 0 ? `&components=${COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
-        const url = `${AUTOCOMPLETE_ENDPOINT}?input=${encodeURIComponent(
-          city
-        )}&key=${GOOGLE_KEY}&sessiontoken=${sessionToken}${comps}&language=en&locationbias=ipbias`;
+          PLACES_COUNTRIES.length > 0 ? `&components=${PLACES_COUNTRIES.map((c) => `country:${c}`).join('|')}` : '';
+        const url =
+          `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
+          `?input=${encodeURIComponent(city)}` +
+          `&key=${GOOGLE_KEY}&sessiontoken=${uuidv4()}${comps}&language=en&locationbias=ipbias`;
         const res = await fetch(url);
         const json = await res.json();
         const pid = json?.predictions?.[0]?.place_id;
         if (pid) {
-          await resolvePlaceDetails(pid, city);
-          return;
+          const det =
+            `https://maps.googleapis.com/maps/api/place/details/json` +
+            `?place_id=${encodeURIComponent(pid)}` +
+            `&fields=geometry,address_components,formatted_address,name` +
+            `&key=${GOOGLE_KEY}`;
+          const dres = await fetch(det);
+          const djson = await dres.json();
+          const { lat, lng } = djson?.result?.geometry?.location ?? {};
+          if (typeof lat === 'number' && typeof lng === 'number') {
+            setCoords({ latitude: lat, longitude: lng });
+            return;
+          }
         }
-      } catch {
-        // fall through
       }
+      // Device geocoder fallback
+      const results = await Location.geocodeAsync(city);
+      if (results?.length) {
+        setCoords({ latitude: results[0].latitude, longitude: results[0].longitude });
+      }
+    } catch {
+      // Non-blocking
     }
-    await geocodeCityFallback(city);
+  };
+
+  const ensureCoordsIfMissing = async () => {
+    if (locationName && (coords.latitude == null || coords.longitude == null)) {
+      try {
+        const results = await Location.geocodeAsync(locationName);
+        if (results?.length) {
+          const c = { latitude: results[0].latitude, longitude: results[0].longitude };
+          setCoords(c);
+          return c;
+        }
+      } catch {}
+    }
+    return coords;
   };
 
   // ---------- Back / Next ----------
-  const handleBack = async () => {
+  const navigationBack = async () => {
     try {
       await saveDraft({
         location: locationName || undefined,
@@ -360,30 +587,12 @@ const SignupStepNine: React.FC = () => {
     navigation.goBack();
   };
 
-  const ensureCoordsIfMissing = async () => {
-    if (locationName && (coords.latitude == null || coords.longitude == null)) {
-      // last try: geocode the typed city
-      try {
-        const results = await Location.geocodeAsync(locationName);
-        if (results?.length) {
-          setCoords({ latitude: results[0].latitude, longitude: results[0].longitude });
-          return { latitude: results[0].latitude, longitude: results[0].longitude };
-        }
-      } catch {}
-    }
-    return coords;
-  };
-
   const handleNext = async () => {
     if (!screenname || !first_name || !phone) {
-      Alert.alert(
-        'Missing Info',
-        'Your signup session is incomplete. Please restart the signup process.'
-      );
+      Alert.alert('Missing Info', 'Your signup session is incomplete. Please restart the signup process.');
       navigation.navigate('ProfileSetupStepOne' as never);
       return;
     }
-
     if (!locationName) {
       Alert.alert('Where You At?', 'Please select or enter your city.');
       return;
@@ -398,10 +607,8 @@ const SignupStepNine: React.FC = () => {
         Alert.alert('Error', 'User authentication failed.');
         return;
       }
-
       const { user } = userData;
 
-      // UPDATE is safer than upsert here (row should already exist)
       const { error: updateError } = await supabase
         .from('profiles')
         .update({
@@ -411,7 +618,7 @@ const SignupStepNine: React.FC = () => {
           location: locationName,
           latitude: latitude ?? null,
           longitude: longitude ?? null,
-          current_step: 'ProfileSetupStepTen', // advance to Step 10 (Photos)
+          current_step: 'ProfileSetupStepTen',
         })
         .eq('id', user.id);
 
@@ -428,11 +635,7 @@ const SignupStepNine: React.FC = () => {
         step: 'ProfileSetupStepTen',
       });
 
-      navigation.navigate('ProfileSetupStepTen' as never, {
-        screenname,
-        first_name,
-        phone,
-      } as never);
+      navigation.navigate('ProfileSetupStepTen' as never, { screenname, first_name, phone } as never);
     } catch (err) {
       console.error('[Step9 Next Error]', err);
       Alert.alert('Unexpected Error', 'Something went wrong. Please try again.');
@@ -447,12 +650,7 @@ const SignupStepNine: React.FC = () => {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={Math.max(0, insets.top + 64)}
       >
-        <TouchableWithoutFeedback
-          onPress={() => {
-            setOpenDropdown(false);
-            Keyboard.dismiss();
-          }}
-        >
+        <TouchableWithoutFeedback onPress={() => { Keyboard.dismiss(); }}>
           <ScrollView
             ref={scrollRef}
             contentContainerStyle={styles.scrollContainer}
@@ -463,78 +661,35 @@ const SignupStepNine: React.FC = () => {
               {screenname ? `Where You Chillin’, @${screenname}? 📍` : 'Where You Chillin’? 📍'}
             </Text>
             <Text style={styles.subtext}>
-              We’ve auto‑filled your location, but feel free to change it or pick from our party hot list.
+              Type your city and pick a suggestion. You can also use your current location.
             </Text>
 
-            <View style={{ position: 'relative' }}>
-              <TextInput
-                style={styles.input}
-                placeholder="Enter your city"
-                value={locationName}
-                onChangeText={(t) => {
-                  setLocationName(t);
-                  // Reset coords while typing; they’ll be set when a suggestion is chosen
-                  setCoords({ latitude: null, longitude: null });
-                  // If 3+ chars, open dropdown immediately for better UX
-                  setOpenDropdown(t.trim().length >= 3);
-                }}
-                placeholderTextColor="#8A94A6"
-                onFocus={() => {
-                  if (suggestions.length > 0 || loadingSuggest) setOpenDropdown(true);
-                }}
-              />
+            {/* Autocomplete (Portal-based) */}
+            <LocationAutocomplete
+              value={locationName}
+              onChangeText={(t) => {
+                setLocationName(t);
+                setCoords({ latitude: null, longitude: null }); // reset until selection
+              }}
+              onSelect={({ name, latitude, longitude }) => {
+                setLocationName(name);
+                setCoords({ latitude, longitude });
+                setTimeout(() => scrollRef.current?.scrollToEnd?.({ animated: true }), 150);
+              }}
+            />
 
-              {/* Autocomplete dropdown */}
-              {openDropdown && (
-                <View style={styles.dropdown}>
-                  {loadingSuggest ? (
-                    <View style={styles.dropdownItem}>
-                      <ActivityIndicator />
-                      <Text style={{ marginLeft: 8, color: '#6b7280' }}>Searching cities…</Text>
-                    </View>
-                  ) : suggestions.length === 0 ? (
-                    <View style={styles.dropdownItem}>
-                      <Text style={{ color: '#6b7280' }}>No matches</Text>
-                    </View>
-                  ) : (
-                    <>
-                      <FlatList
-                        keyboardShouldPersistTaps="handled"
-                        data={suggestions}
-                        keyExtractor={(item) => item.place_id}
-                        renderItem={({ item }) => (
-                          <TouchableOpacity
-                            style={styles.dropdownItem}
-                            activeOpacity={0.8}
-                            onPress={() => handleSuggestionPress(item)}
-                          >
-                            <Text style={{ color: '#111827' }}>{item.description}</Text>
-                          </TouchableOpacity>
-                        )}
-                        ItemSeparatorComponent={() => <View style={styles.separator} />}
-                      />
-                      {/* "Powered by Google" attribution per Places terms */}
-                      {hasPlaces && (
-                        <View style={styles.poweredBy}>
-                          <Text style={styles.poweredText}>Powered by Google</Text>
-                        </View>
-                      )}
-                    </>
-                  )}
-                </View>
-              )}
-            </View>
-
+            {/* Current location (secondary button for visibility) */}
             <TouchableOpacity onPress={handleUseCurrentLocation} style={{ marginVertical: 10 }}>
               <Text style={{ color: DRYNKS_BLUE, fontWeight: '600' }}>📍 Use My Current Location</Text>
             </TouchableOpacity>
 
+            {/* Convenience tiles (do not restrict global search) */}
             <View style={styles.cityGrid}>
               {popularCities.map((city) => (
                 <TouchableOpacity
                   key={city}
                   style={[styles.cityButton, locationName === city && styles.cityButtonSelected]}
-                  onPress={() => handleCityPress(city)}
+                  onPress={() => handleCityQuickPick(city)}
                 >
                   <Text
                     style={[
@@ -550,7 +705,7 @@ const SignupStepNine: React.FC = () => {
 
             <View style={{ marginTop: 30 }}>
               <OnboardingNavButtons
-                onBack={handleBack}
+                onBack={navigationBack}
                 onNext={handleNext}
                 {...({ disabled: !locationName } as any)}
               />
@@ -580,44 +735,46 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#55606B',
     textAlign: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
   },
+
+  // Input (inside LocationAutocomplete)
   input: {
     height: 50,
     borderColor: '#DADFE6',
     borderWidth: 1,
     borderRadius: 10,
     paddingHorizontal: 12,
-    marginBottom: 8,
+    marginBottom: 6,
     fontSize: 16,
     backgroundColor: DRYNKS_GRAY,
     color: '#1F2A33',
   },
-  dropdown: {
+
+  // LocationAutocomplete portal styles (Modal content)
+  portalBox: {
     position: 'absolute',
-    top: 54,
-    left: 0,
-    right: 0,
     backgroundColor: '#fff',
-    borderColor: '#E5E7EB',
     borderWidth: 1,
-    borderRadius: 10,
-    overflow: 'hidden',
-    zIndex: 1000,
-    maxHeight: 260,
+    borderColor: '#e5e7eb',
+    borderRadius: 12,
+    paddingVertical: 4,
+    maxHeight: 300,
+    // shadow
     shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 12,
   },
-  dropdownItem: {
-    paddingHorizontal: 12,
+  suggestionItem: {
     paddingVertical: 10,
-    backgroundColor: '#fff',
+    paddingHorizontal: 12,
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#fff',
   },
-  separator: { height: 1, backgroundColor: '#F3F4F6' },
+  suggestionText: { color: '#111827', flexShrink: 1 },
   poweredBy: {
     borderTopWidth: 1,
     borderTopColor: '#F3F4F6',
@@ -627,6 +784,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   poweredText: { fontSize: 10, color: '#9CA3AF' },
+
+  // Quick picks
   cityGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -643,18 +802,25 @@ const styles = StyleSheet.create({
     borderColor: '#DADFE6',
     borderWidth: 1,
   },
-  cityButtonSelected: {
-    backgroundColor: DRYNKS_RED,
-    borderColor: DRYNKS_RED,
+  cityButtonSelected: { backgroundColor: DRYNKS_RED, borderColor: DRYNKS_RED },
+  cityButtonText: { fontSize: 14, color: '#23303A' },
+  cityButtonTextSelected: { color: DRYNKS_WHITE, fontWeight: '700' },
+
+  // Current location button (inside autocomplete)
+  locFullBtn: {
+    marginTop: 6,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  cityButtonText: {
-    fontSize: 14,
-    color: '#23303A',
-  },
-  cityButtonTextSelected: {
-    color: DRYNKS_WHITE,
-    fontWeight: '700',
-  },
+  locBtnText: { color: DRYNKS_BLUE, fontWeight: '700' },
 });
 
 export default SignupStepNine;

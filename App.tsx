@@ -1,18 +1,24 @@
-// App.tsx — Production-ready with iOS18 safety + push enabled (lazy + safe)
+// App.tsx — RN 0.81 / Expo SDK 54/55 boot with Reanimated v3 and iOS18 safety
 
-// ------------- iOS18 crash guard must be first -------------
+// 1) MUST BE FIRST (before any other import that touches React Native)
+import 'react-native-gesture-handler';
+
+// 2) Reanimated must load very early so worklets/host functions are ready
+import 'react-native-reanimated';
+
+// 3) iOS18 & legacy libs guard (loads after core RN, still early)
+// ❌ removed: import './src/shims/fixNativeEventEmitterAssign';
 import './src/boot/SafeEmitterShim';
 import { unlockEmitters } from './src/boot/SafeEmitterShim';
+import { ensureValidSupabaseSessionOnce } from './src/boot/ensureValidSupabaseSession';
 
-// ------------- polyfills (before anything that touches net/crypto) -------------
+// 4) Polyfills (before any network/crypto usage)
 import 'react-native-url-polyfill/auto';
 import 'react-native-get-random-values';
 import './src/boot/polyfills';
 import { decode as atobPolyfill, encode as btoaPolyfill } from 'base-64';
-// @ts-ignore
-if (typeof global.atob === 'undefined') global.atob = atobPolyfill;
-// @ts-ignore
-if (typeof global.btoa === 'undefined') global.btoa = btoaPolyfill;
+if (typeof (globalThis as any).atob === 'undefined') (globalThis as any).atob = atobPolyfill;
+if (typeof (globalThis as any).btoa === 'undefined') (globalThis as any).btoa = btoaPolyfill;
 
 import React, { useEffect, useRef } from 'react';
 import {
@@ -24,6 +30,7 @@ import {
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { enableScreens } from 'react-native-screens';
 import Constants from 'expo-constants';
 
 import AppNavigator from './src/navigation/AppNavigator';
@@ -31,8 +38,12 @@ import AppBootGate from './src/boot/AppBootGate';
 import GlobalErrorBoundary from './src/boot/GlobalErrorBoundary';
 import UltraSafeBoot from './src/boot/UltraSafeBoot';
 import { supabase } from '@config/supabase';
-import { initInviteDeepLinking } from '@services/InviteLinks'; // capture /invite/<code> + ?code= links
+import { initInviteDeepLinking } from '@services/InviteLinks';
 
+// Prefer native screen primitives (RN 0.81 compatible)
+enableScreens(true);
+
+// Quiet common noisy logs
 LogBox.ignoreLogs(['Setting a timer']);
 
 /* -------------------- env flags -------------------- */
@@ -42,8 +53,6 @@ const RAW_PUSH_FLAG =
     '0') as string;
 const PUSH_DISABLED =
   RAW_PUSH_FLAG === '1' || RAW_PUSH_FLAG.toLowerCase?.() === 'true';
-
-// Push is **allowed** in production when not explicitly disabled
 const PUSH_ALLOWED = !PUSH_DISABLED;
 
 const RAW_SAFE_BOOT =
@@ -53,7 +62,7 @@ const RAW_SAFE_BOOT =
 const SAFE_BOOT =
   RAW_SAFE_BOOT === '1' || RAW_SAFE_BOOT.toLowerCase?.() === 'true';
 
-/* -------------------- navigation helpers -------------------- */
+/* -------------------- optional route breadcrumbs -------------------- */
 let getCurrentRouteSafe:
   | (() => { name?: string } | undefined)
   | null = null;
@@ -79,24 +88,16 @@ function handleTapNavigation(data: any) {
     const t = data?.type as string | undefined;
 
     if (!t) {
-      if (data?.date_id) {
-        navigate('DateFeed', { scrollToDateId: data.date_id } as any);
-      }
+      if (data?.date_id) navigate('DateFeed', { scrollToDateId: data.date_id } as any);
       return;
     }
 
     switch (t) {
       case 'INVITE_RECEIVED':
-        navigate('MyInvites', {
-          inviteId: data?.invite_id,
-          dateId: data?.date_id,
-        } as any);
+        navigate('MyInvites', { inviteId: data?.invite_id, dateId: data?.date_id } as any);
         break;
       case 'INVITE_ACCEPTED':
-        navigate('MyDates', {
-          initialTab: 'Accepted',
-          dateId: data?.date_id,
-        } as any);
+        navigate('MyDates', { initialTab: 'Accepted', dateId: data?.date_id } as any);
         break;
       case 'JOIN_REQUEST':
         navigate('MyDates', {
@@ -106,9 +107,7 @@ function handleTapNavigation(data: any) {
         } as any);
         break;
       default:
-        if (data?.date_id) {
-          navigate('DateFeed', { scrollToDateId: data.date_id } as any);
-        }
+        if (data?.date_id) navigate('DateFeed', { scrollToDateId: data.date_id } as any);
         break;
     }
   } catch (e) {
@@ -161,7 +160,18 @@ function BreadcrumbLogger() {
 export default function App() {
   const listenersAttachedRef = useRef(false);
 
-  // Capture invite deep links at boot (works for cold start + while running)
+  // ✅ Unlock the SafeEmitter shim after the first frame (fixes iOS 18 cold‑start emitter issues)
+  useEffect(() => {
+    const id = requestAnimationFrame(() => unlockEmitters());
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  // Validate session once at boot (prevents stale refresh-token error spam)
+  useEffect(() => {
+    void ensureValidSupabaseSessionOnce();
+  }, []);
+
+  // Deep links for invites (cold + warm)
   useEffect(() => {
     const stop = initInviteDeepLinking();
     return () => {
@@ -171,38 +181,7 @@ export default function App() {
     };
   }, []);
 
-  // Unlock SafeEmitter shim after app becomes active & interactions flush
-  useEffect(() => {
-    let cancelled = false;
-    const unlockWhenReady = async () => {
-      if (AppState.currentState !== 'active') {
-        await new Promise<void>((resolve) => {
-          const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
-            if (s === 'active') {
-              try {
-                sub.remove();
-              } catch {}
-              resolve();
-            }
-          });
-        });
-      }
-      await new Promise<void>((resolve) =>
-        InteractionManager.runAfterInteractions(() => resolve())
-      );
-      if (!cancelled) {
-        try {
-          unlockEmitters();
-        } catch {}
-      }
-    };
-    void unlockWhenReady();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Supabase auth auto-refresh
+  // Supabase token auto-refresh lifecycle
   useEffect(() => {
     supabase.auth.startAutoRefresh?.();
     return () => {
@@ -212,10 +191,9 @@ export default function App() {
     };
   }, []);
 
-  // Optional: refresh-token rotation hook (safe if missing)
+  // Optional: quick-unlock rotation hook if present
   useEffect(() => {
-    /** @type {undefined | (() => void)} */
-    let off;
+    let off: undefined | (() => void);
     try {
       const { attachQuickUnlockRotationListener } = require('@services/QuickUnlockService');
       off = attachQuickUnlockRotationListener();
@@ -229,7 +207,7 @@ export default function App() {
     };
   }, []);
 
-  // --- Push: register once on startup (prod-safe, lazy imports) ---
+  // Push: lazy‑init and listeners (safe on devices without the native module)
   useEffect(() => {
     if (!PUSH_ALLOWED) return;
 
@@ -248,7 +226,6 @@ export default function App() {
     };
   }, []);
 
-  // --- Push: attach listeners for foreground receipt & tap to open ---
   useEffect(() => {
     if (!PUSH_ALLOWED) return;
 
@@ -256,19 +233,16 @@ export default function App() {
     let cleanups: Array<() => void> = [];
 
     const attach = async () => {
-      // Wait for UI to settle — avoids iOS 18 edge cases
       await new Promise<void>((resolve) =>
         InteractionManager.runAfterInteractions(() => resolve())
       );
-      await new Promise<void>((resolve) =>
-        setTimeout(resolve, Platform.OS === 'ios' ? 450 : 60)
-      );
+      await new Promise<void>((r) => setTimeout(r, Platform.OS === 'ios' ? 450 : 60));
       if (cancelled || listenersAttachedRef.current) return;
 
       try {
         const Notifications = await import('expo-notifications');
 
-        // Handle cold-start from a tap (if any)
+        // Handle cold start tap if any
         try {
           const last = await (Notifications as any).getLastNotificationResponseAsync?.();
           const data = last?.notification?.request?.content?.data;
@@ -298,7 +272,6 @@ export default function App() {
 
         listenersAttachedRef.current = true;
       } catch (e) {
-        // If plugin is not present on iOS build, import will throw — safe to ignore
         console.warn('[Push] listeners not attached:', (e as Error)?.message);
       }
     };
@@ -327,7 +300,6 @@ export default function App() {
         <AppBootGate>
           <GlobalErrorBoundary>
             <BreadcrumbLogger />
-            {/* Toggle safe boot via EXPO_PUBLIC_SAFE_BOOT (defaults ON) */}
             {SAFE_BOOT ? <UltraSafeBoot /> : <AppNavigator />}
           </GlobalErrorBoundary>
         </AppBootGate>

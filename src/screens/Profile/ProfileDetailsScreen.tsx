@@ -1,5 +1,12 @@
 // src/screens/Profile/ProfileDetailsScreen.tsx
-import React, { useEffect, useMemo, useRef, useState, useLayoutEffect, useCallback } from 'react';
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useLayoutEffect,
+  useCallback,
+} from 'react';
 import {
   View,
   Text,
@@ -16,6 +23,7 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
   Pressable,
+  Alert,
 } from 'react-native';
 import { useRoute, useNavigation, useFocusEffect } from '@react-navigation/native';
 import { supabase } from '@config/supabase';
@@ -32,7 +40,14 @@ const DRYNKS_WHITE = '#FFFFFF';
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 const HERO_H = Math.min(SCREEN_H * 0.72, 680);
 
-type RouteParams = { userId?: string; origin?: string };
+type RouteParams = {
+  userId?: string;
+  origin?: string;
+  preferHeader?: boolean;
+  dateId?: string | null;
+  afterInviteRoute?: { tab?: string; screen?: string; inner?: string };
+  returnTo?: { name: string; params?: any };
+};
 
 type ProfileRow = {
   id: string;
@@ -42,7 +57,7 @@ type ProfileRow = {
   gender?: string | null;
   location?: string | null;
   preferences?: string[] | null;
-  orientation?: string | null;
+  orientation?: string | null | string[];
   about?: string | null;
   gallery_photos?: string[] | null;
 };
@@ -63,12 +78,9 @@ function ageFromBirthdate(birthdate?: string | null) {
 const SoftGlass: React.FC<
   React.PropsWithChildren<{ tint?: 'dark' | 'light'; style?: any }>
 > = ({ tint = 'dark', style, children }) => {
-  const bg =
-    tint === 'dark' ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.65)';
+  const bg = tint === 'dark' ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.65)';
   const border =
-    tint === 'dark'
-      ? 'rgba(255,255,255,0.18)'
-      : 'rgba(0,0,0,0.08)';
+    tint === 'dark' ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.08)';
 
   return (
     <View
@@ -95,7 +107,7 @@ const SoftGlass: React.FC<
   );
 };
 
-// ---- Glass Back Button
+// ---- Glass Back Button (for custom header mode)
 const GlassBackButton: React.FC<{
   onPress: () => void;
   tint?: 'light' | 'dark';
@@ -139,12 +151,60 @@ const GlassBackButton: React.FC<{
   </Pressable>
 );
 
+// ---- Notifications (robust against schema variations)
+async function insertNotification(base: {
+  user_id: string;
+  type: string; // preferred if column exists
+  title: string;
+  body?: string | null;
+  data?: Record<string, any> | null;
+}) {
+  const { error: e1 } = await supabase.from('notifications').insert([base]);
+  if (!e1) return true;
+
+  // Try alternative shapes (older schema)
+  const msg = String(e1?.message || '').toLowerCase();
+  if (!msg.includes(`'type'`) && !msg.includes('type') && !msg.includes('schema cache')) {
+    throw e1;
+  }
+
+  const { error: e2 } = await supabase.from('notifications').insert([
+    {
+      user_id: base.user_id,
+      event_type: base.type,
+      title: base.title,
+      body: base.body ?? null,
+      data: base.data ?? null,
+    },
+  ]);
+  if (!e2) return true;
+
+  const { error: e3 } = await supabase.from('notifications').insert([
+    {
+      user_id: base.user_id,
+      title: base.title,
+      body: base.body ?? null,
+      data: { ...(base.data || {}), kind: base.type },
+    },
+  ]);
+  if (!e3) return true;
+
+  throw e3;
+}
+
 export default function ProfileDetailsScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute() as any;
   const insets = useSafeAreaInsets();
 
-  const { userId: routeUserId, origin } = (route.params || {}) as RouteParams;
+  const {
+    userId: routeUserId,
+    origin,
+    preferHeader = false,
+    dateId: ctxDateId = null,
+    afterInviteRoute,
+    returnTo,
+  } = (route.params || {}) as RouteParams;
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [me, setMe] = useState<string | null>(null);
@@ -154,8 +214,10 @@ export default function ProfileDetailsScreen() {
   const [targetUserId, setTargetUserId] = useState<string | null>(
     routeUserId ?? null
   );
+  const [inviting, setInviting] = useState(false);
+  const [invited, setInvited] = useState(false);
 
-  // Header sizing (push hero down so header isn't floating)
+  // Header sizing (only used when using the custom glass header)
   const TOP_ROW = 44;
   const BACK_ROW = 48;
   const HEADER_SPACING = 10;
@@ -167,15 +229,19 @@ export default function ProfileDetailsScreen() {
   const heroRef = useRef<FlatList<string>>(null);
   const [index, setIndex] = useState(0);
 
-  // ---- Smart back: prefer pop; then origin; then safe app route
+  // ---- Smart back: prefer pop; then route.returnTo; then origin; then safe app route
   const smartBack = useCallback(() => {
-    // 1) If this screen was pushed, pop to the exact previous screen.
     if (navigation.canGoBack()) {
       navigation.goBack();
       return;
     }
 
-    // 2) Try the declared origin (deep links / reset cases).
+    // Try explicit returnTo first
+    if (returnTo?.name) {
+      try { navigation.navigate(returnTo.name as never, (returnTo.params || {}) as never); return; } catch {}
+      try { navigation.getParent()?.navigate(returnTo.name as never, (returnTo.params || {}) as never); return; } catch {}
+    }
+
     const tryNavigate = (name?: string) => {
       if (!name) return false;
       try { navigation.navigate(name as never); return true; } catch {}
@@ -183,9 +249,9 @@ export default function ProfileDetailsScreen() {
       try { navigation.getParent()?.getParent()?.navigate(name as never); return true; } catch {}
       return false;
     };
+
     if (origin && tryNavigate(origin)) return;
 
-    // 3) Final safe fallbacks — land inside your main app shell (with header/footer).
     const candidates = [
       'My DrYnks', 'MyDates', 'ManageApplicants', 'MySentInvites',
       'JoinRequests', 'ReceivedInvites', 'Explore', 'DateFeed',
@@ -194,12 +260,10 @@ export default function ProfileDetailsScreen() {
       if (tryNavigate(name)) return;
       try { navigation.navigate('App' as never, { screen: name } as never); return; } catch {}
     }
-
-    // Last resort — app container
     try { navigation.navigate('App' as never); } catch {}
-  }, [navigation, origin]);
+  }, [navigation, origin, returnTo]);
 
-  // Resolve session and "me" + default target
+  // Resolve session and "me" + default target + my avatar
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -208,7 +272,7 @@ export default function ProfileDetailsScreen() {
       if (!mounted) return;
       setMe(uid);
       if (!routeUserId && uid) setTargetUserId(uid);
-      // load my avatar for header
+
       if (uid) {
         const { data: myp } = await supabase
           .from('profiles')
@@ -224,6 +288,7 @@ export default function ProfileDetailsScreen() {
     };
   }, [routeUserId]);
 
+  // Fetch viewed profile
   const initialFetch = useCallback(async () => {
     if (!targetUserId) return;
     setLoading(true);
@@ -242,21 +307,18 @@ export default function ProfileDetailsScreen() {
     setLoading(false);
   }, [targetUserId]);
 
-  // First load
   useEffect(() => {
     initialFetch();
   }, [initialFetch]);
 
-  // ---- REFRESH ON FOCUS
+  // Refresh on focus
   const refreshOnFocus = useCallback(async () => {
     if (!targetUserId) return;
     const [{ data: prof }, { data: sess }] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', targetUserId).single(),
       supabase.auth.getSession(),
     ]);
-
     if (prof) setProfile(prof as ProfileRow);
-
     const uid = sess?.session?.user?.id ?? null;
     setMe(uid);
     if (uid) {
@@ -276,7 +338,7 @@ export default function ProfileDetailsScreen() {
     }, [refreshOnFocus])
   );
 
-  // ---- LIVE UPDATES VIA SUPABASE REALTIME
+  // Live updates
   useEffect(() => {
     if (!targetUserId) return;
     const channel = supabase
@@ -297,7 +359,7 @@ export default function ProfileDetailsScreen() {
   const age = useMemo(() => ageFromBirthdate(profile?.birthdate), [profile?.birthdate]);
   const isOwner = Boolean(me && profile && me === profile.id);
 
-  // Image list
+  // Images
   const images = useMemo(() => {
     if (!profile) return [];
     const hero = profile.profile_photo ? [profile.profile_photo] : [];
@@ -310,10 +372,136 @@ export default function ProfileDetailsScreen() {
     });
   }, [profile]);
 
-  // Hide native header; render our own
+  // ---- Native header toggle (preferHeader)
   useLayoutEffect(() => {
-    navigation.setOptions({ headerShown: false });
-  }, [navigation]);
+    navigation.setOptions({
+      headerShown: preferHeader,
+      headerTitle: profile?.screenname || 'Profile',
+      headerBackTitleVisible: false,
+    });
+  }, [navigation, preferHeader, profile?.screenname]);
+
+  // ---------- Invite flow ----------
+  const goToAfterInvite = useCallback(() => {
+    const a = afterInviteRoute || { tab: 'App', screen: 'My DrYnks', inner: 'MyDates' };
+
+    // Try hierarchy: tab -> screen (inside tab) -> inner
+    if (a.tab) {
+      try {
+        if (a.screen) {
+          // Nested: App → screen(tab) → inner
+          if (a.inner) {
+            navigation.navigate(a.tab as never, { screen: a.screen, params: { screen: a.inner } } as never);
+          } else {
+            navigation.navigate(a.tab as never, { screen: a.screen } as never);
+          }
+          return;
+        }
+        navigation.navigate(a.tab as never);
+        return;
+      } catch {}
+    }
+
+    // Direct tries
+    try { navigation.navigate('App' as never, { screen: 'My DrYnks' } as never); return; } catch {}
+    try { navigation.getParent()?.navigate('My DrYnks' as never); return; } catch {}
+    try { navigation.getParent()?.navigate('MyDates' as never); return; } catch {}
+
+    navigation.reset({ index: 0, routes: [{ name: 'App' as never, params: { screen: 'My DrYnks' } as never }] as any });
+  }, [afterInviteRoute, navigation]);
+
+  // Dual-write (date_requests + invites), idempotent
+  const sendInvite = useCallback(
+    async (hostId: string, toUserId: string, dateId: string) => {
+      // Quick dedupe
+      const [{ data: existsDR }, { data: existsLegacy }] = await Promise.all([
+        supabase
+          .from('date_requests')
+          .select('id,status')
+          .eq('date_id', dateId)
+          .eq('requester_id', hostId)
+          .eq('recipient_id', toUserId)
+          .limit(1),
+        supabase
+          .from('invites')
+          .select('id,status')
+          .eq('date_id', dateId)
+          .eq('inviter_id', hostId)
+          .eq('invitee_id', toUserId)
+          .limit(1),
+      ]);
+
+      const alreadyPendingDR = Array.isArray(existsDR) && existsDR.some(r => r?.status === 'pending');
+      const alreadyPendingLegacy = Array.isArray(existsLegacy) && existsLegacy.some(r => r?.status === 'pending');
+
+      if (!alreadyPendingDR) {
+        const { error: e1 } = await supabase
+          .from('date_requests')
+          .insert([{ date_id: dateId, requester_id: hostId, recipient_id: toUserId, status: 'pending' }]);
+        if (e1 && e1.code !== '23505') throw e1;
+      }
+
+      if (!alreadyPendingLegacy) {
+        const { error: e2 } = await supabase
+          .from('invites')
+          .insert([{ date_id: dateId, inviter_id: hostId, invitee_id: toUserId, status: 'pending' }]);
+        if (e2 && e2.code !== '23505') throw e2;
+      }
+
+      // Best‑effort notification
+      try {
+        await insertNotification({
+          user_id: toUserId,
+          type: 'invite',
+          title: 'You have a DrYnks invite 🍸',
+          body: 'Open the app to view and respond.',
+          data: { action: 'invite_inapp', date_id: dateId, inviter_id: hostId },
+        });
+      } catch {
+        /* non-fatal */
+      }
+    },
+    []
+  );
+
+  const onInviteToDate = useCallback(async () => {
+    // If we have a dateId context (came from Invite Nearby), send the invite immediately
+    if (ctxDateId && profile?.id) {
+      if (!me) {
+        Alert.alert('Not signed in', 'Please sign in again.');
+        return;
+      }
+      if (inviting || invited) return;
+
+      setInviting(true);
+      try {
+        await sendInvite(me, profile.id, ctxDateId);
+        setInvited(true);
+        Alert.alert('Invite sent', profile.screenname || 'Guest');
+        goToAfterInvite();
+      } catch (err: any) {
+        Alert.alert('Invite failed', err?.message || 'Please try again.');
+      } finally {
+        setInviting(false);
+      }
+      return;
+    }
+
+    // No dateId context → go to My DrYnks (footer) instead of CreateDate
+    try {
+      navigation.navigate('App' as never, { screen: 'My DrYnks', params: { screen: 'MyDates' } } as never);
+    } catch {
+      // final fallback
+      navigation.reset({ index: 0, routes: [{ name: 'App' as never, params: { screen: 'My DrYnks' } as never }] as any });
+    }
+  }, [ctxDateId, profile?.id, profile?.screenname, me, inviting, invited, sendInvite, goToAfterInvite, navigation]);
+
+  const onMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
+    if (i !== index) setIndex(i);
+  };
+
+  const onMessage = () => navigation.navigate('PrivateChat', { toUserId: profile?.id });
 
   if (loading) {
     return (
@@ -328,68 +516,57 @@ export default function ProfileDetailsScreen() {
       <SafeAreaView style={[styles.center, { backgroundColor: DRYNKS_BLUE }]}>
         <StatusBar barStyle="light-content" />
         <Text style={styles.errorText}>{loadError || 'Profile not found.'}</Text>
-        <TouchableOpacity
-          onPress={smartBack}
-          style={styles.retryBtn}
-        >
+        <TouchableOpacity onPress={smartBack} style={styles.retryBtn}>
           <Text style={styles.retryText}>Go Back</Text>
         </TouchableOpacity>
       </SafeAreaView>
     );
   }
 
-  const onMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
-    if (i !== index) setIndex(i);
-  };
-
-  const onMessage = () => navigation.navigate('PrivateChat', { toUserId: profile.id });
-  const onInviteToDate = () => navigation.navigate('CreateDate', { inviteUserId: profile.id });
+  // When using native header, don't push down the content as much
+  const containerTopPad = preferHeader ? Math.max(insets.top, 4) : HEADER_H;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: DRYNKS_BLUE, paddingTop: HEADER_H }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: DRYNKS_BLUE, paddingTop: containerTopPad }}>
       <StatusBar barStyle="light-content" />
 
-      {/* Header — center logo replaced with DrYnks_Y_logo.png */}
-      <View style={styles.headerWrap} pointerEvents="box-none">
-        <SoftGlass tint="dark" style={[styles.headerGlass, { paddingTop: insets.top }]}>
-          <View style={styles.headerTop}>
-            <TouchableOpacity
-              onPress={() => navigation.navigate('ProfileMenu')}
-              accessibilityLabel="Open Profile Menu"
-            >
-              {myAvatar ? (
-                <Image source={{ uri: myAvatar }} style={styles.headerProfilePic} />
-              ) : (
-                <View style={styles.headerProfilePlaceholder} />
-              )}
-            </TouchableOpacity>
+      {/* Custom header only when NOT preferring native header */}
+      {!preferHeader && (
+        <View style={styles.headerWrap} pointerEvents="box-none">
+          <SoftGlass tint="dark" style={[styles.headerGlass, { paddingTop: insets.top }]}>
+            <View style={styles.headerTop}>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('ProfileMenu')}
+                accessibilityLabel="Open Profile Menu"
+              >
+                {myAvatar ? (
+                  <Image source={{ uri: myAvatar }} style={styles.headerProfilePic} />
+                ) : (
+                  <View style={styles.headerProfilePlaceholder} />
+                )}
+              </TouchableOpacity>
 
-            <Image
-              source={require('@assets/images/DrYnks_Y_logo.png')}
-              style={styles.headerLogoImg}
-              resizeMode="contain"
-              accessibilityIgnoresInvertColors
-            />
+              <Image
+                source={require('@assets/images/DrYnks_Y_logo.png')}
+                style={styles.headerLogoImg}
+                resizeMode="contain"
+                accessibilityIgnoresInvertColors
+              />
 
-            <TouchableOpacity
-              onPress={() => navigation.navigate('Notifications')}
-              accessibilityLabel="Open Notifications"
-            >
-              <Ionicons name="notifications-outline" size={22} color={DRYNKS_WHITE} />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.headerBottom}>
-            <GlassBackButton
-              onPress={smartBack}
-              tint="dark"
-              label="Back"
-              color="#fff"
-            />
-            <View style={{ width: 48 }} />
-          </View>
-        </SoftGlass>
-      </View>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('Notifications')}
+                accessibilityLabel="Open Notifications"
+              >
+                <Ionicons name="notifications-outline" size={22} color={DRYNKS_WHITE} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.headerBottom}>
+              <GlassBackButton onPress={smartBack} tint="dark" label="Back" color="#fff" />
+              <View style={{ width: 48 }} />
+            </View>
+          </SoftGlass>
+        </View>
+      )}
 
       {/* HERO — swipeable photos */}
       <View style={styles.heroWrap}>
@@ -429,7 +606,12 @@ export default function ProfileDetailsScreen() {
                   {profile.location ?? 'Unknown'}
                 </Text>
                 {profile.orientation ? (
-                  <Text style={styles.meta}>Orientation: {profile.orientation}</Text>
+                  <Text style={styles.meta}>
+                    Orientation:{' '}
+                    {Array.isArray(profile.orientation)
+                      ? profile.orientation.join(', ')
+                      : profile.orientation}
+                  </Text>
                 ) : null}
               </View>
             </TouchableOpacity>
@@ -479,8 +661,15 @@ export default function ProfileDetailsScreen() {
               <TouchableOpacity onPress={onMessage} style={[styles.cta, styles.ctaPrimary]}>
                 <Text style={styles.ctaText}>Message</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={onInviteToDate} style={[styles.cta, styles.ctaSecondary]}>
-                <Text style={styles.ctaTextDark}>Invite to Date</Text>
+              <TouchableOpacity
+                onPress={onInviteToDate}
+                style={[styles.cta, styles.ctaSecondary, (inviting || invited) && { opacity: 0.7 }]}
+                disabled={inviting || invited}
+                accessibilityState={{ disabled: inviting || invited }}
+              >
+                <Text style={styles.ctaTextDark}>
+                  {invited ? 'Invited' : 'Invite to Date'}
+                </Text>
               </TouchableOpacity>
             </>
           ) : (
@@ -553,7 +742,7 @@ export default function ProfileDetailsScreen() {
 }
 
 const styles = StyleSheet.create({
-  // Glass header
+  // Glass header (custom mode)
   headerWrap: {
     position: 'absolute',
     top: 0,

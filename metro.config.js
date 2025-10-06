@@ -1,12 +1,27 @@
-// metro.config.js at project root
-let getDefaultConfig;
+// metro.config.js
+const path = require('path');
 
+let getDefaultConfig;
 try {
-  // If you have Expo (you do), use Expo's Metro config:
   ({ getDefaultConfig } = require('expo/metro-config'));
 } catch {
-  // Fallback to React Native's config in case Expo isn't available
   ({ getDefaultConfig } = require('@react-native/metro-config'));
 }
 
-module.exports = getDefaultConfig(__dirname);
+const config = getDefaultConfig(__dirname);
+
+// Use real native Branch only when explicitly enabled
+const useNativeBranch = !!process.env.USE_BRANCH_NATIVE;
+
+config.resolver = config.resolver || {};
+config.resolver.extraNodeModules = config.resolver.extraNodeModules || {};
+
+if (!useNativeBranch) {
+  // In Expo Go, alias Branch to a no-op shim to avoid native crashes
+  config.resolver.extraNodeModules['react-native-branch'] = path.resolve(
+    __dirname,
+    'src/shims/branch.js'
+  );
+}
+
+module.exports = config;

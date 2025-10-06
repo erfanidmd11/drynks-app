@@ -50,3 +50,14 @@ Supabase/.temp/
 .expo
 .expo-shared
 .expo-config.*
+
+echo "supabase/.secrets" >> .gitignore
+.expo/
+# Local env
+.env
+.env.*
+
+# macOS
+.DS_Store
+PR_BODY.md
+!.env.example

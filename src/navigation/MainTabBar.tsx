@@ -19,10 +19,17 @@ import MyDatesScreen from '../screens/Dates/MyDatesScreen';
 import ProfileMenu from '@components/common/ProfileMenu';
 import NotificationBell from '@components/common/NotificationBell';
 
-type DrYnksNotification = {
+/** ---- Types ---- */
+export type DrYnksNotification = {
   id: string;
   user_id: string;
-  type: 'invite_received' | 'invite_revoked' | 'invite_accepted' | 'join_request_received' | 'join_request_accepted' | 'generic';
+  type:
+    | 'invite_received'
+    | 'invite_revoked'
+    | 'invite_accepted'
+    | 'join_request_received'
+    | 'join_request_accepted'
+    | 'generic';
   data?: any;
   read_at: string | null;
   created_at: string;
@@ -30,7 +37,14 @@ type DrYnksNotification = {
   body?: string | null;
 };
 
-const Tab = createBottomTabNavigator();
+type MainTabParamList = {
+  DateFeed: undefined;     // label: "Explore"
+  'My DrYnks': undefined;
+  Vibe: undefined;
+  'New Date': undefined;
+};
+
+const Tab = createBottomTabNavigator<MainTabParamList>();
 
 const Logo = () => (
   <Image
@@ -40,11 +54,16 @@ const Logo = () => (
   />
 );
 
-const VALID_SCREENS = new Set([
-  'Explore', 'My DrYnks', 'Vibe', 'New Date',
-  'CreateDate', 'InviteNearby', 'MyDates', 'DateFeed',
-  'GroupChat', 'Messages', 'PrivateChat', 'Profile', 'EditProfile', 'MyInvites',
-  'SentInvites', 'MySentInvites', 'JoinRequests', 'Settings',
+/** Stack-level + tab-level route keys we may navigate to from notifications */
+const VALID_SCREENS = new Set<string>([
+  // bottom tabs
+  'DateFeed', 'My DrYnks', 'Vibe', 'New Date',
+  // stack routes available from AppNavigator
+  'CreateDate', 'InviteNearby', 'MyDates',
+  'GroupChat', 'Messages', 'PrivateChat',
+  'Profile', 'EditProfile',
+  'MyInvites', 'SentInvites', 'MySentInvites', 'JoinRequests',
+  'Settings',
 ]);
 
 const safeNavigate = (navigation: any, screen: string, params?: any) => {
@@ -66,7 +85,6 @@ const NotificationModal = ({
   notifications: DrYnksNotification[];
   markAsReadAndNavigate: (n: DrYnksNotification) => void;
 }) => {
-  const navigation = useNavigation<any>();
   if (!visible) return null;
 
   return (
@@ -111,9 +129,9 @@ const NotificationModal = ({
   );
 };
 
-const getIconName = (routeName: string) => {
+const getIconName = (routeName: keyof MainTabParamList) => {
   switch (routeName) {
-    case 'Explore':
+    case 'DateFeed':
       return 'map';
     case 'My DrYnks':
       return 'heart';
@@ -126,12 +144,12 @@ const getIconName = (routeName: string) => {
   }
 };
 
-const MainTabBar = () => {
+const MainTabBar: React.FC = () => {
   const [notificationVisible, setNotificationVisible] = useState(false);
   const [notifications, setNotifications] = useState<DrYnksNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [userId, setUserId] = useState<string | null>(null);
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const navigation = useNavigation<any>();
 
@@ -139,20 +157,26 @@ const MainTabBar = () => {
     setUnreadCount(rows.filter((r) => !r.read_at).length);
   }, []);
 
-  const fetchForUser = useCallback(async (uid: string) => {
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', uid)
-      .order('created_at', { ascending: false })
-      .limit(50);
-    if (error) {
-      console.warn('[MainTabBar] notifications fetch error', error);
-      return;
-    }
-    setNotifications((data || []) as DrYnksNotification[]);
-    recalcUnread((data || []) as DrYnksNotification[]);
-  }, [recalcUnread]);
+  const fetchForUser = useCallback(
+    async (uid: string) => {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', uid)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.warn('[MainTabBar] notifications fetch error', error);
+        return;
+      }
+
+      const rows = (data || []) as DrYnksNotification[];
+      setNotifications(rows);
+      recalcUnread(rows);
+    },
+    [recalcUnread]
+  );
 
   useEffect(() => {
     (async () => {
@@ -165,30 +189,41 @@ const MainTabBar = () => {
 
   useEffect(() => {
     if (!userId) return;
+
     const channel = supabase
       .channel('notifications_user_feed')
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+        {
+          event: '*',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${userId}`,
+        },
         (payload) => {
           setNotifications((prev) => {
             const rows = [...prev];
-            const idx = rows.findIndex((r) => r.id === (payload.new as any)?.id);
+
             if (payload.eventType === 'DELETE') {
               return rows.filter((r) => r.id !== (payload.old as any)?.id);
             }
-            if (idx >= 0) {
-              rows[idx] = payload.new as any;
-              return rows.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
-            }
-            rows.unshift(payload.new as any);
-            return rows.slice(0, 50);
+
+            // upsert/sort
+            const next = payload.new as DrYnksNotification;
+            const idx = rows.findIndex((r) => r.id === next.id);
+            if (idx >= 0) rows[idx] = next;
+            else rows.unshift(next);
+
+            return rows
+              .sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at))
+              .slice(0, 50);
           });
         }
       )
       .subscribe();
 
-    pollRef.current = setInterval(() => fetchForUser(userId), 30000);
+    // lightweight polling as a backstop
+    pollRef.current = setInterval(() => fetchForUser(userId), 30_000);
 
     return () => {
       channel.unsubscribe();
@@ -206,31 +241,38 @@ const MainTabBar = () => {
       case 'invite_received':
         return { screen: 'MyInvites', params: undefined };
       case 'invite_accepted':
-        return { screen: 'MyDates', params: { initialTab: 'Accepted', dateId: data?.dateId || data?.date_id } };
+        return {
+          screen: 'MyDates',
+          params: { initialTab: 'Accepted', dateId: data?.dateId || data?.date_id },
+        };
       case 'join_request_received':
         return { screen: 'JoinRequests', params: undefined };
       default:
         if (data?.screen && VALID_SCREENS.has(data.screen)) {
           return { screen: data.screen as string, params: data.params };
         }
-        return { screen: 'Explore', params: undefined };
+        // Fallback to the tab route key
+        return { screen: 'DateFeed', params: undefined };
     }
   }, []);
 
-  const markAsReadAndNavigate = useCallback(async (n: DrYnksNotification) => {
-    try {
-      if (!n.read_at) {
-        await supabase
-          .from('notifications')
-          .update({ read_at: new Date().toISOString() })
-          .eq('id', n.id);
+  const markAsReadAndNavigate = useCallback(
+    async (n: DrYnksNotification) => {
+      try {
+        if (!n.read_at) {
+          await supabase
+            .from('notifications')
+            .update({ read_at: new Date().toISOString() })
+            .eq('id', n.id);
+        }
+      } catch (e) {
+        console.warn('[MainTabBar] mark read error', e);
       }
-    } catch (e) {
-      console.warn('[MainTabBar] mark read error', e);
-    }
-    const target = navFromNotification(n);
-    safeNavigate(navigation, target.screen, target.params);
-  }, [navigation, navFromNotification]);
+      const target = navFromNotification(n);
+      safeNavigate(navigation, target.screen, target.params);
+    },
+    [navigation, navFromNotification]
+  );
 
   return (
     <>
@@ -240,6 +282,7 @@ const MainTabBar = () => {
         notifications={notifications}
         markAsReadAndNavigate={markAsReadAndNavigate}
       />
+
       <Tab.Navigator
         screenOptions={({ route }) => ({
           headerTitle: () => <Logo />,
@@ -254,15 +297,22 @@ const MainTabBar = () => {
               onPress={() => setNotificationVisible((v) => !v)}
             />
           ),
+          headerShadowVisible: false,
           tabBarIcon: ({ color, size }) => {
-            const iconName = getIconName(route.name);
+            const iconName = getIconName(route.name as keyof MainTabParamList);
             return <Ionicons name={iconName as any} size={size} color={color} />;
           },
           tabBarActiveTintColor: '#ff5a5f',
           tabBarInactiveTintColor: 'gray',
+          tabBarHideOnKeyboard: true,
         })}
       >
-        <Tab.Screen name="Explore" component={DateFeedScreen} />
+        {/* Route name MUST match the Stack route key; label can differ */}
+        <Tab.Screen
+          name="DateFeed"
+          component={DateFeedScreen}
+          options={{ title: 'Explore' }}
+        />
         <Tab.Screen name="My DrYnks" component={MyDatesScreen} />
         <Tab.Screen name="Vibe" component={MessagesScreen} />
         <Tab.Screen name="New Date" component={CreateDateScreen} />

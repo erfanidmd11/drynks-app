@@ -5,6 +5,16 @@
 // Header: center logo now uses DrYnks_Y_logo.png instead of letter "Y".
 // FIXES: (1) Location input is single-line; current-location button is on its own line.
 //        (2) KeyboardAvoidingView so keyboard never covers the input or the dropdown.
+//        (3) Image resizeMode uses valid strings (no ResizeMode enum for <Image>).
+//        (4) Supabase Storage upload body uses ArrayBuffer (SDK 54/supabase-js 2 friendly).
+//        (5) ImagePicker permission flow treats iOS "limited" access as acceptable.
+
+// src/screens/EditProfileScreen.tsx
+// Production-ready (Expo SDK 54/55):
+// - ❌ No expo-file-system usage
+// - ✅ ImageManipulator returns base64; upload bytes to Supabase
+// - Robust Google Places city autocomplete + current location
+// - Keeps existing UI/behaviour
 
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -27,7 +37,6 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import { decode as atob } from 'base-64';
 import { v4 as uuidv4 } from 'uuid';
@@ -91,31 +100,53 @@ function ageFromBirthdate(birthdate?: string | null) {
 }
 
 async function ensureMediaLibraryPermission(): Promise<boolean> {
-  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (status !== 'granted') {
-    Alert.alert('Permission required', 'We need access to your photos to continue.');
-    return false;
+  try {
+    let perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      perm = await ImagePicker.requestMediaLibraryPermissionsAsync(); // no options in SDK 54
+    }
+    // Accept iOS "limited" access as sufficient for picker
+    const ok = perm.granted || (perm as any).accessPrivileges === 'limited';
+    if (!ok) {
+      Alert.alert('Permission required', 'We need access to your photos to continue.');
+      return false;
+    }
+    return true;
+  } catch {
+    // Let the system picker prompt if possible
+    return true;
   }
-  return true;
 }
 
+function base64ToUint8Array(b64: string): Uint8Array {
+  // Use global atob if available (browsers), else polyfill from 'base-64'
+  const bin =
+    typeof (globalThis as any).atob === 'function'
+      ? (globalThis as any).atob(b64)
+      : atob(b64);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// 🚫 No expo-file-system here. We ask ImageManipulator to produce base64.
 async function uploadImageToStorage(localUri: string, userId: string): Promise<string> {
-  // Compress before upload
+  // Compress & generate base64 in one pass
   const manipulated = await ImageManipulator.manipulateAsync(
     localUri,
     [{ resize: { width: 1080 } }],
-    { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
+    { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG, base64: true }
   );
 
-  const base64 = await FileSystem.readAsStringAsync(manipulated.uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
+  const base64 = manipulated.base64;
+  if (!base64) {
+    throw new Error('Failed to read image data (base64 unavailable).');
+  }
 
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
+  const bytes = base64ToUint8Array(base64);
   const filePath = `${userId}/${uuidv4()}.jpg`;
+
   const { data, error } = await supabase.storage
     .from(PROFILE_BUCKET)
     .upload(filePath, bytes, {
@@ -281,7 +312,7 @@ const LocationAutocomplete: React.FC<{
         returnKeyType="done"
       />
 
-      {/* Current location on its own line (so long city names are fully visible) */}
+      {/* Current location on its own line */}
       <TouchableOpacity onPress={useCurrentLocation} style={styles.locFullBtn} accessibilityLabel="Use my current location">
         <Ionicons name="location" size={16} color={DRYNKS_BLUE} />
         <Text style={styles.locBtnText}>Use My Current Location</Text>
@@ -674,7 +705,7 @@ const EditProfileScreen: React.FC = () => {
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={HEADER_H} // push content by header height
+        keyboardVerticalOffset={HEADER_H}
       >
         {/* Content */}
         <ScrollView
